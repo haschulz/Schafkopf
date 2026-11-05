@@ -1,0 +1,4 @@
+/target/
+/bin/
+/config/traces/
+.DS_Store
