@@ -17,6 +17,7 @@ public class WenzContract implements GameContract {
     private final Player caller;
     private final GameType type; // WENZ or FARBWENZ
     private final Suit trumpSuit; // null for plain Wenz, non-null for Farbwenz
+    private final boolean tout;
 
     /** Creates a plain Wenz contract (no suit trump). */
     public WenzContract(Player caller) {
@@ -30,9 +31,18 @@ public class WenzContract implements GameContract {
      * @param trumpSuit additional trump suit (null = plain Wenz)
      */
     public WenzContract(Player caller, Suit trumpSuit) {
+        this(caller, trumpSuit, false);
+    }
+
+    public WenzContract(Player caller, boolean tout) {
+        this(caller, null, tout);
+    }
+
+    private WenzContract(Player caller, Suit trumpSuit, boolean tout) {
         this.caller = Objects.requireNonNull(caller, "Caller must not be null");
         this.trumpSuit = trumpSuit;
         this.type = (trumpSuit != null) ? GameType.FARBWENZ : GameType.WENZ;
+        this.tout = tout;
     }
 
     @Override
@@ -48,6 +58,11 @@ public class WenzContract implements GameContract {
     /** Returns the optional additional trump suit (only for Farbwenz). */
     public Suit trumpSuit() {
         return trumpSuit;
+    }
+
+    @Override
+    public boolean isTout() {
+        return tout;
     }
 
     /**
@@ -132,7 +147,7 @@ public class WenzContract implements GameContract {
         if (type == GameType.FARBWENZ) {
             return "Farbwenz auf " + trumpSuit.displayName() + " (gerufen von " + caller.name() + ")";
         }
-        return "Wenz (gerufen von " + caller.name() + ")";
+        return "Wenz" + (tout ? " Tout" : "") + " (gerufen von " + caller.name() + ")";
     }
 
     @Override

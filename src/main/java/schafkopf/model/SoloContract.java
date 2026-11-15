@@ -31,6 +31,7 @@ public class SoloContract implements GameContract {
 
     private final Player caller;
     private final Suit trumpSuit;
+    private final boolean tout;
 
     /**
      * Creates a Farbsolo contract.
@@ -39,8 +40,13 @@ public class SoloContract implements GameContract {
      * @param trumpSuit the chosen trump suit (any of the four suits)
      */
     public SoloContract(Player caller, Suit trumpSuit) {
+        this(caller, trumpSuit, false);
+    }
+
+    public SoloContract(Player caller, Suit trumpSuit, boolean tout) {
         this.caller    = Objects.requireNonNull(caller,    "Caller must not be null");
         this.trumpSuit = Objects.requireNonNull(trumpSuit, "Trump suit must not be null");
+        this.tout = tout;
     }
 
     @Override
@@ -56,6 +62,11 @@ public class SoloContract implements GameContract {
     /** Returns the chosen trump suit. */
     public Suit trumpSuit() {
         return trumpSuit;
+    }
+
+    @Override
+    public boolean isTout() {
+        return tout;
     }
 
     /**
@@ -146,7 +157,8 @@ public class SoloContract implements GameContract {
 
     @Override
     public String displayName() {
-        return "Farbsolo auf " + trumpSuit.displayName() + " (gerufen von " + caller.name() + ")";
+        return "Farbsolo" + (tout ? " Tout" : "") + " auf " + trumpSuit.displayName()
+            + " (gerufen von " + caller.name() + ")";
     }
 
     @Override

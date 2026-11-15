@@ -180,6 +180,27 @@ class GameBiddingAdvisorTest {
     }
 
     @Test
+    void soloTrumpSuitIsNotCountedAsAnEmptySideSuit() {
+        Player player = new Player("1", "Sepp");
+        player.setHand(List.of(
+                new Card(Suit.GRAS, Rank.SIEBEN), new Card(Suit.HERZ, Rank.KOENIG),
+                new Card(Suit.GRAS, Rank.ZEHN), new Card(Suit.HERZ, Rank.NEUN),
+                new Card(Suit.EICHEL, Rank.ZEHN), new Card(Suit.GRAS, Rank.SAU),
+                new Card(Suit.SCHELLEN, Rank.UNTER), new Card(Suit.EICHEL, Rank.SAU)));
+        GameBiddingAdvisor advisor = new GameBiddingAdvisor(
+                new RuleEngine(), PolicyGenome.baseline(), ignored -> { }, ContractValueModel.empty());
+
+        double voidSideSuits = advisor.featuresFor(player, new SoloContract(player, Suit.GRAS))
+                .get("voidSideSuits");
+
+        assertEquals(1.0, voidSideSuits);
+        PolicyGenome activeGenome = PolicyGenome.load(java.nio.file.Path.of("config/policy-genome.properties"));
+        GameBiddingAdvisor activeAdvisor = new GameBiddingAdvisor(
+                new RuleEngine(), activeGenome, ignored -> { }, ContractValueModel.empty());
+        assertNull(activeAdvisor.recommend(player, Personality.SOLIDE, java.util.Set.of(GameType.FARBSOLO)));
+    }
+
+    @Test
     void farbwenzCountsOnlyUntersAsTopTrumpsAndScoresTrumpSuitQuality() {
         Player player = new Player("1", "Sepp");
         player.setHand(List.of(

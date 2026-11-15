@@ -22,6 +22,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.LinkedHashMap;
+import java.util.Set;
 import java.util.function.Consumer;
 
 public final class GameBiddingAdvisor {
@@ -54,11 +55,20 @@ public final class GameBiddingAdvisor {
     }
 
     public ContractRecommendation recommend(Player player, Personality personality) {
+        return recommend(player, personality, Set.of(GameType.values()));
+    }
+
+    public ContractRecommendation recommend(
+            Player player,
+            Personality personality,
+            Set<GameType> allowedGameTypes
+    ) {
         List<ContractRecommendation> candidates = new ArrayList<>();
         addRufspielCandidate(player, personality, candidates);
         addSoloCandidates(player, candidates);
         addWenzCandidates(player, candidates);
         addBettelCandidate(player, candidates);
+        candidates.removeIf(candidate -> !allowedGameTypes.contains(candidate.contract().gameType()));
         ContractRecommendation recommendation = candidates.stream()
                 .max(Comparator.comparingDouble(ContractRecommendation::score))
                 .orElse(null);
@@ -180,6 +190,12 @@ public final class GameBiddingAdvisor {
             chosenSuitTrumpPoints = suitTrumps.stream().mapToInt(Card::points).sum();
         }
         for (Suit suit : Suit.values()) {
+            boolean hasNonTrumpCards = List.of(Rank.SAU, Rank.ZEHN, Rank.KOENIG, Rank.NEUN, Rank.ACHT, Rank.SIEBEN)
+                    .stream()
+                    .anyMatch(rank -> !contract.isTrump(new Card(suit, rank), rules));
+            if (!hasNonTrumpCards) {
+                continue;
+            }
             List<Card> sideCards = player.hand().stream()
                 .filter(card -> !contract.isTrump(card, rules) && card.suit() == suit)
                 .toList();

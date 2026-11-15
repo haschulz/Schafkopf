@@ -29,6 +29,13 @@ public class Deck {
         Collections.shuffle(cards, random);
     }
 
+    public void cut(int cardsFromTop) {
+        if (cardsFromTop < 1 || cardsFromTop >= cards.size()) {
+            throw new IllegalArgumentException("Cut must leave cards in both packets");
+        }
+        Collections.rotate(cards, -cardsFromTop);
+    }
+
     public List<Card> cards() {
         return Collections.unmodifiableList(cards);
     }

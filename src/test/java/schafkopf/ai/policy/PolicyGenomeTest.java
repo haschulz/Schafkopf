@@ -3,6 +3,8 @@ package schafkopf.ai.policy;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Random;
@@ -23,6 +25,17 @@ class PolicyGenomeTest {
         expected.save(path);
 
         assertEquals(expected, PolicyGenome.load(path));
+    }
+
+    @Test
+    void genomeCanLoadFromAnEmbeddedAssetStream() {
+        String properties = "genome.schemaVersion=1\ngenome.id=embedded\nweight.bid.WENZ.threshold=8.5\n";
+
+        PolicyGenome genome = PolicyGenome.load(
+                new ByteArrayInputStream(properties.getBytes(StandardCharsets.UTF_8)));
+
+        assertEquals("embedded", genome.id());
+        assertEquals(8.5, genome.weight("bid.WENZ.threshold"));
     }
 
     @Test

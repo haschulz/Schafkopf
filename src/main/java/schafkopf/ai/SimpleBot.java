@@ -394,6 +394,20 @@ public class SimpleBot {
             }
         }
 
+        if (!player.equals(contract.caller()) && switch (contract.gameType()) {
+            case FARBSOLO, FARBWENZ, WENZ, GEIER -> true;
+            default -> false;
+        }) {
+            Card sideSuitLead = legalMoves.stream()
+                    .filter(card -> !contract.isTrump(card, rules))
+                    .min(Comparator.comparingInt(Card::points).thenComparingInt(contract::getSuitStrength))
+                    .orElse(null);
+            if (sideSuitLead != null) {
+                return new MoveExplanation(player, sideSuitLead, requirement,
+                        "Verteidigung eröffnet mit niedriger Fehlfarbe " + sideSuitLead.shortName(), true);
+            }
+        }
+
         Card lowest = legalMoves.stream()
                 .min(Comparator.comparingInt(Card::points)
                         .thenComparingInt(contract::getSuitStrength))

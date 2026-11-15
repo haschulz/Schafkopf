@@ -16,12 +16,46 @@ import schafkopf.rules.RuleEngine;
 
 import java.util.List;
 import java.util.ArrayList;
+import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SimpleBotGenomePolicyTest {
     private final RuleEngine rules = new RuleEngine();
+
+        @Test
+        void activeGenomeDoesNotLeadLowestTrumpFromObservedWeakGrassSoloHand() {
+                Player caller = new Player("1", "Sepp");
+                Card highestTrump = new Card(Suit.SCHELLEN, Rank.UNTER);
+                caller.setHand(List.of(
+                                new Card(Suit.GRAS, Rank.SIEBEN), new Card(Suit.HERZ, Rank.KOENIG),
+                                new Card(Suit.GRAS, Rank.ZEHN), new Card(Suit.HERZ, Rank.NEUN),
+                                new Card(Suit.EICHEL, Rank.ZEHN), new Card(Suit.GRAS, Rank.SAU),
+                                highestTrump, new Card(Suit.EICHEL, Rank.SAU)));
+                SoloContract contract = new SoloContract(caller, Suit.GRAS);
+                PolicyGenome activeGenome = PolicyGenome.load(Path.of("config/policy-genome.properties"));
+
+                MoveExplanation move = new SimpleBot(rules, true, activeGenome)
+                                .chooseMove(caller, new Trick(1, caller), contract, List.of(caller), 1);
+
+                assertEquals(highestTrump, move.card());
+        }
+
+        @Test
+        void soloDefenderLeadsNonTrumpWhenOneIsAvailable() {
+                Player caller = new Player("1", "Hans");
+                Player defender = new Player("2", "Franz");
+                Card sideSuitCard = new Card(Suit.EICHEL, Rank.SIEBEN);
+                defender.setHand(List.of(new Card(Suit.GRAS, Rank.SIEBEN), sideSuitCard));
+                SoloContract contract = new SoloContract(caller, Suit.GRAS);
+                PolicyGenome activeGenome = PolicyGenome.load(Path.of("config/policy-genome.properties"));
+
+                MoveExplanation move = new SimpleBot(rules, true, activeGenome)
+                                .chooseMove(defender, new Trick(1, defender), contract, List.of(caller), 1);
+
+                assertEquals(sideSuitCard, move.card());
+        }
 
     @Test
     void genomeCanChangeFarbsoloLeadFromHighestTrumpToHighPointSau() {

@@ -112,15 +112,24 @@ public class RuleEngine {
         // 1. Ausspiel (First card of the trick)
         if (trick.playedCards().isEmpty()) {
             List<Card> legalCards = new ArrayList<>();
+            long calledSuitCount = hand.stream()
+                    .filter(card -> isNonTrumpSuit(card, contract.calledSuit()))
+                    .count();
+            boolean partnerMayRunUnder = isPartnerWithCalledSau && !calledSauPlayedBefore
+                    && calledSuitCount >= 4;
             for (Card c : hand) {
                 // Rule check for caller: Caller may not lead the called suit before the Sau was played,
                 // UNLESS caller has >= 3 cards of the called suit or only cards of that suit left.
                 if (player.equals(contract.caller()) && !calledSauPlayedBefore && isNonTrumpSuit(c, contract.calledSuit())) {
-                    long suitCount = hand.stream().filter(card -> isNonTrumpSuit(card, contract.calledSuit())).count();
                     boolean onlySuitLeft = hand.stream().allMatch(card -> isNonTrumpSuit(card, contract.calledSuit()));
-                    if (suitCount < 3 && !onlySuitLeft) {
+                    if (calledSuitCount < 3 && !onlySuitLeft) {
                         continue; // Cannot lead called suit yet!
                     }
+                }
+                if (isPartnerWithCalledSau && !calledSauPlayedBefore
+                        && isNonTrumpSuit(c, contract.calledSuit())
+                        && !c.equals(contract.calledSau()) && !partnerMayRunUnder) {
+                    continue;
                 }
                 legalCards.add(c);
             }

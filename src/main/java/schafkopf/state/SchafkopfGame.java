@@ -21,6 +21,7 @@ import schafkopf.rules.RuleEngine;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -41,6 +42,9 @@ public class SchafkopfGame {
     private GameMemory memory;
     private final List<Trick> completedTricks = new ArrayList<>();
     private Trick currentTrick;
+    private Player trickLeader;
+    private int currentTrickNumber;
+    private int turnIndex;
     private boolean calledSauPlayed = false;
     private boolean schneiderPaid = true;
     private boolean schwarzClaimed = true;
@@ -107,6 +111,31 @@ public class SchafkopfGame {
         return result;
     }
 
+    public Player currentPlayer() {
+        if (currentPhase != Phase.TRICK_PLAY || currentTrick == null) {
+            return null;
+        }
+        int leaderIndex = players.indexOf(trickLeader);
+        return players.get((leaderIndex + turnIndex) % players.size());
+    }
+
+    public int currentTrickNumber() {
+        return currentTrickNumber;
+    }
+
+    public List<PlayedCard> currentTrickCards() {
+        return currentTrick == null ? List.of() : List.copyOf(currentTrick.playedCards());
+    }
+
+    public List<Card> legalMovesForCurrentPlayer() {
+        Player player = currentPlayer();
+        if (player == null) {
+            return List.of();
+        }
+        return List.copyOf(rules.getLegalMovesForContract(
+                player, currentTrick, contract, calledSauPlayed, currentTrickNumber));
+    }
+
     public List<Player> players() {
         return List.copyOf(players);
     }
@@ -143,9 +172,28 @@ public class SchafkopfGame {
      * Deals cards randomly to all 4 players.
      */
     public void dealRandom() {
+        deal(null, null);
+    }
+
+    public void dealRandom(long seed) {
+        deal(new Random(seed), null);
+    }
+
+    public void dealRandom(long seed, int cutCardsFromTop) {
+        deal(new Random(seed), cutCardsFromTop);
+    }
+
+    private void deal(Random random, Integer cutCardsFromTop) {
         transitionTo(Phase.DEALING);
         deck.reset();
-        deck.shuffle();
+        if (random == null) {
+            deck.shuffle();
+        } else {
+            deck.shuffle(random);
+        }
+        if (cutCardsFromTop != null) {
+            deck.cut(cutCardsFromTop);
+        }
         List<List<Card>> hands = deck.deal4x8();
         for (int i = 0; i < 4; i++) {
             players.get(i).reset();
@@ -224,79 +272,120 @@ public class SchafkopfGame {
      * Plays the entire 8 tricks using the Bot logic with full explanatory logging.
      */
     public GameResult playFullGame(Player startingLeader) {
-        transitionTo(Phase.TRICK_PLAY);
+        startTrickPlay(startingLeader);
+        while (currentPhase == Phase.TRICK_PLAY) {
+            playBotTurn();
+        }
+        return result;
+    }
+
+    public void startTrickPlay(Player startingLeader) {
         if (contract == null) {
             throw new IllegalStateException("No game contract has been selected");
         }
+        if (!players.contains(startingLeader)) {
+            throw new IllegalArgumentException("Starting leader must be seated at this table");
+        }
+        transitionTo(Phase.TRICK_PLAY);
         if (contract instanceof RufspielContract && memory == null) {
             memory = new GameMemory(players, rules);
         }
-        Player leader = startingLeader;
+        currentTrickNumber = 1;
+        turnIndex = 0;
+        trickLeader = startingLeader;
+        currentTrick = new Trick(currentTrickNumber, trickLeader);
+    }
 
-        for (int trickNum = 1; trickNum <= 8; trickNum++) {
-            log(String.format("\n--- STICH %d (Ausspiel: %s) ---", trickNum, leader.name()));
-            currentTrick = new Trick(trickNum, leader);
+    public MoveExplanation playBotTurn() {
+        Player player = currentPlayer();
+        if (player == null) {
+            throw new IllegalStateException("The game is not waiting for a card play");
+        }
+        List<Player> remainingPlayers = remainingPlayers();
+        MoveExplanation explanation = chooseBotMove(player, remainingPlayers);
+        int trickNumber = currentTrickNumber;
+        int turnNumber = turnIndex + 1;
+        playCard(explanation.card());
+        log(explanation.toLogLine(trickNumber, turnNumber));
+        return explanation;
+    }
 
-            int leaderIdx = players.indexOf(leader);
-            for (int turn = 0; turn < 4; turn++) {
-                Player current = players.get((leaderIdx + turn) % 4);
-
-                // Compute remaining players yet to play after current in this trick
-                List<Player> remainingPlayers = new ArrayList<>();
-                for (int k = turn + 1; k < 4; k++) {
-                    remainingPlayers.add(players.get((leaderIdx + k) % 4));
-                }
-
-                MoveExplanation explanation = contract instanceof RufspielContract rufspielContract
-                    ? botProvider.apply(current).chooseMove(current, currentTrick, rufspielContract, partner, calledSauPlayed,
-                        trickNum, memory, remainingPlayers)
-                    : botProvider.apply(current).chooseMove(current, currentTrick, contract, teamFor(current), trickNum,
-                        contract instanceof KreuzbockContract
-                            ? (players.indexOf(current) % 2 == 0 ? "KREUZBOCK_TEAM_A" : "KREUZBOCK_TEAM_B")
-                            : null);
-
-                Card chosen = explanation.card();
-                current.removeCard(chosen);
-
-                int prevObsCount = memory == null ? 0 : memory.observationLogs().size();
-                if (memory != null) {
-                    memory.recordCardPlayed(current, chosen, currentTrick, (RufspielContract) contract);
-                }
-                currentTrick.addCard(current, chosen);
-
-                if (contract instanceof RufspielContract rufspielContract && chosen.equals(rufspielContract.calledSau())) {
-                    calledSauPlayed = true;
-                }
-
-                log(explanation.toLogLine(trickNum, turn + 1));
-
-                // Log any new memory deductions (Farbfreiheit / Aufdeckung)
-                if (memory != null) {
-                    for (int o = prevObsCount; o < memory.observationLogs().size(); o++) {
-                        log("   💡 [Gedächtnis] " + memory.observationLogs().get(o));
-                    }
-                }
-            }
-
-            PlayedCard winningCard = rules.evaluateTrickWinner(currentTrick, contract);
-            Player winner = winningCard.player();
-            winner.addWonTrick(currentTrick);
-            if (memory != null) {
-                memory.recordTrickCompleted(currentTrick, winner);
-            }
-            completedTricks.add(currentTrick);
-
-            log(String.format("=> Stich %d geht an %s mit %s (%d Augen im Stich, Gesamt: %d Augen)",
-                    trickNum,
-                    winner.name(),
-                    winningCard.card().shortName(),
-                    currentTrick.totalPoints(),
-                    winner.totalAugen()));
-
-            leader = winner; // Winner leads next trick
+    public void playCard(Card card) {
+        Player player = currentPlayer();
+        if (player == null) {
+            throw new IllegalStateException("The game is not waiting for a card play");
+        }
+        if (!legalMovesForCurrentPlayer().contains(card)) {
+            throw new IllegalArgumentException("Illegal card for " + player.name() + ": " + card);
         }
 
-        return finishGame();
+        player.removeCard(card);
+        int previousObservations = memory == null ? 0 : memory.observationLogs().size();
+        if (memory != null) {
+            memory.recordCardPlayed(player, card, currentTrick, (RufspielContract) contract);
+        }
+        currentTrick.addCard(player, card);
+
+        if (contract instanceof RufspielContract rufspielContract && card.equals(rufspielContract.calledSau())) {
+            calledSauPlayed = true;
+        }
+
+        if (memory != null) {
+            List<String> observations = memory.observationLogs();
+            for (int index = previousObservations; index < observations.size(); index++) {
+                log("   [Gedächtnis] " + observations.get(index));
+            }
+        }
+
+        turnIndex++;
+        if (currentTrick.isComplete()) {
+            completeCurrentTrick();
+        }
+    }
+
+    private MoveExplanation chooseBotMove(Player player, List<Player> remainingPlayers) {
+        if (contract instanceof RufspielContract rufspielContract) {
+            return botProvider.apply(player).chooseMove(
+                    player, currentTrick, rufspielContract, partner, calledSauPlayed,
+                    currentTrickNumber, memory, remainingPlayers);
+        }
+        String roleOverride = contract instanceof KreuzbockContract
+                ? (players.indexOf(player) % 2 == 0 ? "KREUZBOCK_TEAM_A" : "KREUZBOCK_TEAM_B")
+                : null;
+        return botProvider.apply(player).chooseMove(
+                player, currentTrick, contract, teamFor(player), currentTrickNumber, roleOverride);
+    }
+
+    private List<Player> remainingPlayers() {
+        List<Player> remaining = new ArrayList<>();
+        int leaderIndex = players.indexOf(trickLeader);
+        for (int offset = turnIndex + 1; offset < players.size(); offset++) {
+            remaining.add(players.get((leaderIndex + offset) % players.size()));
+        }
+        return remaining;
+    }
+
+    private void completeCurrentTrick() {
+        PlayedCard winningCard = rules.evaluateTrickWinner(currentTrick, contract);
+        trickLeader = winningCard.player();
+        trickLeader.addWonTrick(currentTrick);
+        if (memory != null) {
+            memory.recordTrickCompleted(currentTrick, trickLeader);
+        }
+        completedTricks.add(currentTrick);
+
+        log(String.format("=> Stich %d geht an %s mit %s (%d Augen im Stich, Gesamt: %d Augen)",
+                currentTrickNumber, trickLeader.name(), winningCard.card().shortName(),
+                currentTrick.totalPoints(), trickLeader.totalAugen()));
+
+        if (currentTrickNumber == 8) {
+            currentTrick = null;
+            finishGame();
+        } else {
+            currentTrickNumber++;
+            turnIndex = 0;
+            currentTrick = new Trick(currentTrickNumber, trickLeader);
+        }
     }
 
     public GameResult finishGame() {
@@ -326,14 +415,19 @@ public class SchafkopfGame {
             callerWon = true;
         } else if (contract.gameType() == GameType.BETTEL) {
             callerWon = contract.caller().wonTricks().isEmpty();
+        } else if (contract.isTout()) {
+            callerWon = callerTricks == 8;
         } else {
             callerWon = callerPoints >= 61;
         }
-        boolean specialScoring = contract.gameType() == GameType.BETTEL || contract.gameType() == GameType.RAMSCH;
-        boolean isSchneider = !specialScoring
+        boolean specialScoring = contract.gameType() == GameType.BETTEL
+            || contract.gameType() == GameType.RAMSCH;
+        boolean isSchneider = !specialScoring && !contract.isTout()
                 && ((callerWon && defenderPoints <= 30) || (!callerWon && callerPoints <= 30));
         boolean isSchwarz = !specialScoring
-            && ((callerWon && defenderTricks == 0) || (!callerWon && callerTricks == 0));
+            && (contract.isTout()
+            ? callerWon && defenderTricks == 0
+            : (callerWon && defenderTricks == 0) || (!callerWon && callerTricks == 0));
 
         StringBuilder sb = new StringBuilder();
         sb.append("\n=========================================\n");

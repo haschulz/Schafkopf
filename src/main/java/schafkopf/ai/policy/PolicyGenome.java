@@ -202,13 +202,21 @@ public record PolicyGenome(int schemaVersion, String id, Map<String, Double> wei
     }
 
     public static PolicyGenome load(Path path) {
-        Properties properties = new Properties();
         try (InputStream input = Files.newInputStream(path)) {
-            properties.load(input);
+            return load(input);
         } catch (IOException exception) {
             throw new IllegalStateException("Could not load policy genome: " + path, exception);
         }
+    }
 
+    public static PolicyGenome load(InputStream input) {
+        Objects.requireNonNull(input, "Genome input stream must not be null");
+        Properties properties = new Properties();
+        try {
+            properties.load(input);
+        } catch (IOException exception) {
+            throw new IllegalStateException("Could not load policy genome from stream", exception);
+        }
         int schemaVersion;
         try {
             schemaVersion = Integer.parseInt(properties.getProperty("genome.schemaVersion", ""));

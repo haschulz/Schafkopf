@@ -35,4 +35,9 @@ public interface GameContract {
 
     /** Human-readable name of the contract. */
     String displayName();
+
+    /** Whether the declarer must win all eight tricks. */
+    default boolean isTout() {
+        return false;
+    }
 }

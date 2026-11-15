@@ -6,6 +6,7 @@ import schafkopf.config.SchafkopfConfig;
 import schafkopf.economy.ScoreLedger;
 import schafkopf.economy.Tariff;
 import schafkopf.rules.RuleEngine;
+import schafkopf.rules.GameBiddingRules;
 import schafkopf.state.GameResult;
 import schafkopf.state.SchafkopfGame;
 
@@ -53,6 +54,42 @@ class ContractRulesTest {
                 IllegalArgumentException.class,
                 () -> new RufspielContract(caller, Suit.HERZ)
         );
+    }
+
+    @Test
+    void rufspielPartnerMustNotLeadUnderCalledAceWithoutFourCardsOfTheSuit() {
+        Player caller = new Player("1", "Sepp");
+        Player partner = new Player("2", "Hans");
+        RufspielContract contract = new RufspielContract(caller, Suit.EICHEL);
+        Card calledAce = contract.calledSau();
+        Card eichelTen = new Card(Suit.EICHEL, Rank.ZEHN);
+        partner.setHand(List.of(
+                calledAce, eichelTen,
+                new Card(Suit.GRAS, Rank.SIEBEN), new Card(Suit.GRAS, Rank.ACHT),
+                new Card(Suit.HERZ, Rank.SIEBEN), new Card(Suit.HERZ, Rank.ACHT),
+                new Card(Suit.SCHELLEN, Rank.SIEBEN), new Card(Suit.SCHELLEN, Rank.ACHT)));
+        Trick trick = new Trick(1, caller);
+
+        List<Card> legalMoves = rules.getLegalMoves(partner, trick, contract, false, 1);
+
+        assertTrue(legalMoves.contains(calledAce));
+        assertFalse(legalMoves.contains(eichelTen));
+    }
+
+    @Test
+    void rufspielPartnerMayRunUnderCalledAceWithFourCardsOfTheSuit() {
+        Player caller = new Player("1", "Sepp");
+        Player partner = new Player("2", "Hans");
+        RufspielContract contract = new RufspielContract(caller, Suit.EICHEL);
+        Card eichelTen = new Card(Suit.EICHEL, Rank.ZEHN);
+        partner.setHand(List.of(
+                contract.calledSau(), eichelTen,
+                new Card(Suit.EICHEL, Rank.KOENIG), new Card(Suit.EICHEL, Rank.NEUN),
+                new Card(Suit.GRAS, Rank.SIEBEN), new Card(Suit.GRAS, Rank.ACHT),
+                new Card(Suit.HERZ, Rank.SIEBEN), new Card(Suit.SCHELLEN, Rank.ACHT)));
+        Trick trick = new Trick(1, caller);
+
+        assertTrue(rules.getLegalMoves(partner, trick, contract, false, 1).contains(eichelTen));
     }
 
     @Test
@@ -111,6 +148,58 @@ class ContractRulesTest {
         assertFalse(contract.isTrump(eichelOber, rules));
         assertEquals(5, contract.getSuitStrength(eichelOber));
         assertEquals(8, contract.getSuitStrength(eichelSau));
+    }
+
+    @Test
+    void biddingOnlyAllowsContractsAboveThePreviousAnnouncement() {
+        Player caller = new Player("1", "Sepp");
+        GameBiddingRules bidding = new GameBiddingRules();
+        GameContract rufspiel = new RufspielContract(caller, Suit.EICHEL);
+
+        assertFalse(bidding.canAnnounce(new RufspielContract(caller, Suit.GRAS), rufspiel));
+        assertTrue(bidding.canAnnounce(new WenzContract(caller), rufspiel));
+        assertTrue(bidding.canAnnounce(new SoloContract(caller, Suit.EICHEL), rufspiel));
+        assertTrue(bidding.canAnnounce(new SoloContract(caller, Suit.EICHEL, true), rufspiel));
+        assertTrue(bidding.canAnnounce(new WenzContract(caller, true), rufspiel));
+        assertFalse(bidding.canAnnounce(new WenzContract(caller), new WenzContract(caller)));
+        assertTrue(bidding.canAnnounce(new WenzContract(caller, true), new WenzContract(caller)));
+    }
+
+    @Test
+    void toutRequiresAllEightTricksAndPaysExistingSchwarzBonus() {
+        Player caller = new Player("1", "Sepp");
+        assertToutResult(new SoloContract(caller, Suit.EICHEL, true), true);
+        assertToutResult(new WenzContract(caller, true), false);
+    }
+
+    private void assertToutResult(GameContract contract, boolean callerWins) {
+        List<Player> players = List.of(
+                new Player("1", "P1"),
+                new Player("2", "P2"),
+                new Player("3", "P3"),
+                new Player("4", "P4"));
+        SchafkopfGame game = new SchafkopfGame(players, rules, new SimpleBot(rules));
+        game.setLogger(message -> { });
+        game.setupContract(contract instanceof SoloContract
+                ? new SoloContract(players.get(0), ((SoloContract) contract).trumpSuit(), true)
+                : new WenzContract(players.get(0), true));
+        for (int trickNumber = 1; trickNumber <= 8; trickNumber++) {
+            Player winner = callerWins || trickNumber < 8 ? players.get(0) : players.get(1);
+            Trick trick = new Trick(trickNumber, players.get(0));
+            trick.setWinningPlayedCard(new schafkopf.model.PlayedCard(
+                    winner, new Card(Suit.EICHEL, Rank.OBER)));
+            winner.addWonTrick(trick);
+            game.completedTricks().add(trick);
+        }
+
+        GameResult result = game.finishGame();
+        Tariff.PaymentBreakdown payment = new Tariff(SchafkopfConfig.defaults()).calculatePayment(game);
+
+        assertEquals(callerWins, result.callerTeamWon());
+        assertEquals(callerWins, result.isSchwarz());
+        assertFalse(result.isSchneider());
+        assertEquals(callerWins ? 10 : 0, payment.schwarzCents());
+        assertEquals(50 + (callerWins ? 10 : 0), payment.totalCentsPerPlayer());
     }
 
     @Test

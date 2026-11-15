@@ -9,6 +9,8 @@ import schafkopf.analysis.FarbWenzSoloistValidator;
 import schafkopf.analysis.FarbWenzSoloistOptimizer;
 import schafkopf.analysis.HoldoutValidator;
 import schafkopf.analysis.PolicyTournament;
+import schafkopf.analysis.GameRecord;
+import schafkopf.analysis.PostGameAnalyzer;
 import schafkopf.ai.SimpleBot;
 import schafkopf.ai.policy.GeneticAlgorithm;
 import schafkopf.ai.policy.DecisionTraceWriter;
@@ -26,8 +28,69 @@ import java.util.List;
 import java.nio.file.Path;
 
 public class SchafkopfApp {
+    /** Usage: nachkarteln-datei FILE PLAYER_NAME [samples] */
+    private static void runRecordedGameReview(String[] args) {
+        if (args.length < 3) {
+            System.out.println("Aufruf: nachkarteln-datei <Datei> <Spielername> [Verteilungen]");
+            return;
+        }
+        try {
+            String text = new String(java.nio.file.Files.readAllBytes(Path.of(args[1])),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            GameRecord record = schafkopf.analysis.GameRecordParser.parse(text);
+            int seat = record.playerNames().stream().map(String::toLowerCase).toList().indexOf(args[2].toLowerCase());
+            if (seat < 0) {
+                System.out.println("Spieler '" + args[2] + "' kommt in der Partie nicht vor: " + record.playerNames());
+                return;
+            }
+            int samples = args.length > 3 ? Integer.parseInt(args[3]) : 100;
+            RuleEngine rules = new RuleEngine();
+            SimpleBot bot = new SimpleBot(rules, true, PolicyGenome.loadConfigured());
+            PostGameAnalyzer analyzer = new PostGameAnalyzer(rules, bot, samples);
+            System.out.println(PostGameAnalyzer.report(analyzer.review(record, seat, 1L)));
+        } catch (java.io.IOException | IllegalArgumentException invalid) {
+            System.out.println("Partie konnte nicht gelesen werden: " + invalid.getMessage());
+        }
+    }
+
+    /** Usage: nachkarteln [dealSeed] [seat 0-3] [samples] */
+    private static void runPostGameReview(String[] args, SchafkopfConfig config) {
+        long dealSeed = args.length > 1 ? Long.parseLong(args[1]) : 4711L;
+        int seat = args.length > 2 ? Integer.parseInt(args[2]) : 0;
+        int samples = args.length > 3 ? Integer.parseInt(args[3]) : 60;
+        RuleEngine rules = new RuleEngine();
+        SimpleBot bot = new SimpleBot(rules, true, PolicyGenome.loadConfigured());
+        List<Player> players = List.of(new Player("1", "Sepp"), new Player("2", "Hans"),
+                new Player("3", "Franz"), new Player("4", "Michl"));
+        SchafkopfGame game = new SchafkopfGame(players, rules, bot, config);
+        game.setLogger(null);
+        game.dealRandom(dealSeed);
+        game.autoDetermineRufspiel();
+        game.playFullGame(players.get(0));
+
+        GameRecord record = GameRecord.from(game);
+        System.out.println(game.gameContract().displayName() + ", angesagt von "
+                + game.gameContract().caller().name());
+        for (int index = 0; index < record.plays().size(); index += 4) {
+            System.out.println("Stich " + (index / 4 + 1) + ": " + record.plays().subList(index, index + 4).stream()
+                    .map(play -> record.playerNames().get(play.seat()) + " " + play.card().shortName())
+                    .toList());
+        }
+        System.out.println();
+        PostGameAnalyzer analyzer = new PostGameAnalyzer(rules, bot, samples);
+        System.out.println(PostGameAnalyzer.report(analyzer.review(record, seat, dealSeed)));
+    }
+
     public static void main(String[] args) {
         SchafkopfConfig config = SchafkopfConfig.load();
+        if (args.length > 0 && args[0].equalsIgnoreCase("nachkarteln")) {
+            runPostGameReview(args, config);
+            return;
+        }
+        if (args.length > 0 && args[0].equalsIgnoreCase("nachkarteln-datei")) {
+            runRecordedGameReview(args);
+            return;
+        }
         if (args.length > 0 && args[0].equalsIgnoreCase("evolve")) {
             runEvolution(args, config);
             return;
