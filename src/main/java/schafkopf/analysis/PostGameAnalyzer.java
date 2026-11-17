@@ -15,7 +15,6 @@ import schafkopf.state.SchafkopfGame;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -59,10 +58,54 @@ public final class PostGameAnalyzer {
                                  int eyesWithRealCards) {
     }
 
-    public record DecisionReview(int trickNumber, int positionInTrick, Card played, Verdict verdict,
+    public record DecisionReview(int playIndex, int trickNumber, int positionInTrick, Card played, Verdict verdict,
                                  MoveAssessment better, List<MoveAssessment> alternatives, int samples) {
         public MoveAssessment playedAssessment() {
             return alternatives.stream().filter(move -> move.card().equals(played)).findFirst().orElseThrow();
+        }
+    }
+
+    public record LearningProposal(
+            int seat,
+            String playerName,
+            int playIndex,
+            int trickNumber,
+            Card played,
+            Card suggested,
+            double playedWinRate,
+            double suggestedWinRate,
+            double playedMeanEyes,
+            double suggestedMeanEyes,
+            int samples
+    ) {
+    }
+
+    public record CounterfactualPlay(int seat, String playerName, Card card) {
+    }
+
+    public record CounterfactualTrick(
+            int number,
+            List<CounterfactualPlay> plays,
+            int winnerSeat,
+            String winnerName,
+            int eyes
+    ) {
+        public CounterfactualTrick {
+            plays = List.copyOf(plays);
+        }
+    }
+
+    public record CounterfactualLine(
+            int analyzedSeat,
+            String analyzedPlayerName,
+            Card originalCard,
+            Card chosenAlternative,
+            List<CounterfactualTrick> tricks,
+            boolean analyzedTeamWon,
+            int analyzedTeamEyes
+    ) {
+        public CounterfactualLine {
+            tricks = List.copyOf(tricks);
         }
     }
 
@@ -92,46 +135,108 @@ public final class PostGameAnalyzer {
         this.samples = samples;
     }
 
-    public GameReview review(GameRecord record, int seat, long seed) {
+    public GameReview review(GameRecord gameRecord, int seat, long seed) {
         Random random = new Random(seed);
         List<DecisionReview> decisions = new ArrayList<>();
-        for (int index = 0; index < record.plays().size(); index++) {
-            if (record.plays().get(index).seat() == seat) {
-                decisions.add(reviewDecision(record, index, random));
+        for (int index = 0; index < gameRecord.plays().size(); index++) {
+            if (gameRecord.plays().get(index).seat() == seat) {
+                decisions.add(reviewDecision(gameRecord, index, random));
             }
         }
-        Outcome actual = playOut(record, record.initialHands(), record.plays().size(), null, seat);
+        Outcome actual = playOut(gameRecord, gameRecord.initialHands(), gameRecord.plays().size(), null, seat);
         double firstChance = decisions.get(0).alternatives().stream()
                 .mapToDouble(MoveAssessment::winRate).max().orElse(0);
-        return new GameReview(seat, record.playerNames().get(seat), actual.won(), actual.eyes(),
+        return new GameReview(seat, gameRecord.playerNames().get(seat), actual.won(), actual.eyes(),
                 firstChance, List.copyOf(decisions));
     }
 
-    private DecisionReview reviewDecision(GameRecord record, int playIndex, Random random) {
-        GameRecord.Play play = record.plays().get(playIndex);
-        SchafkopfGame realGame = record.replay(record.initialHands(), playIndex, rules, rolloutBot);
+    public List<GameReview> reviewAll(GameRecord gameRecord, long seed) {
+        List<GameReview> reviews = new ArrayList<>(4);
+        for (int seat = 0; seat < 4; seat++) {
+            reviews.add(review(gameRecord, seat, seed + seat * 1_000_003L));
+        }
+        return List.copyOf(reviews);
+    }
+
+    public static List<LearningProposal> learningProposals(List<GameReview> reviews) {
+        List<LearningProposal> proposals = new ArrayList<>();
+        for (GameReview review : reviews) {
+            for (DecisionReview decision : review.decisions()) {
+                if (decision.verdict() != Verdict.FEHLER || decision.better() == null) {
+                    continue;
+                }
+                MoveAssessment played = decision.playedAssessment();
+                MoveAssessment suggested = decision.better();
+                proposals.add(new LearningProposal(
+                        review.seat(), review.playerName(), decision.playIndex(), decision.trickNumber(),
+                        decision.played(), suggested.card(), played.winRate(), suggested.winRate(),
+                        played.meanEyes(), suggested.meanEyes(), decision.samples()));
+            }
+        }
+        return List.copyOf(proposals);
+    }
+
+    /** Replays one alternative with the actual deal; this hindsight line is illustrative, not the verdict basis. */
+    public CounterfactualLine simulateAlternative(
+            GameRecord gameRecord, DecisionReview decision, Card alternative
+    ) {
+        return simulateAlternative(gameRecord, decision.playIndex(), alternative);
+    }
+
+    public CounterfactualLine simulateAlternative(GameRecord gameRecord, int playIndex, Card alternative) {
+        GameRecord.Play originalPlay = gameRecord.plays().get(playIndex);
+        SchafkopfGame game = gameRecord.replay(gameRecord.initialHands(), playIndex, rules, rolloutBot);
+        if (!game.legalMovesForCurrentPlayer().contains(alternative)) {
+            throw new IllegalArgumentException("Alternative card is not legal at the recorded decision");
+        }
+        game.playCard(alternative);
+        while (game.phase() == Phase.TRICK_PLAY) {
+            game.playBotTurn();
+        }
+
+        List<CounterfactualTrick> tricks = game.completedTricks().stream().map(trick -> {
+            List<CounterfactualPlay> plays = trick.playedCards().stream()
+                    .map(play -> new CounterfactualPlay(
+                            game.players().indexOf(play.player()), play.player().name(), play.card()))
+                    .toList();
+            Player winner = trick.winningPlayedCard().player();
+            return new CounterfactualTrick(trick.trickNumber(), plays,
+                    game.players().indexOf(winner), winner.name(), trick.totalPoints());
+        }).toList();
+        GameResult result = game.result();
+        Player analyzedPlayer = game.players().get(originalPlay.seat());
+        boolean callerSide = result.callerTeam().contains(analyzedPlayer);
+        return new CounterfactualLine(originalPlay.seat(), gameRecord.playerNames().get(originalPlay.seat()),
+            originalPlay.card(), alternative, tricks,
+                callerSide == result.callerTeamWon(),
+                callerSide ? result.callerTeamAugen() : result.defenderTeamAugen());
+    }
+
+    private DecisionReview reviewDecision(GameRecord gameRecord, int playIndex, Random random) {
+        GameRecord.Play play = gameRecord.plays().get(playIndex);
+        SchafkopfGame realGame = gameRecord.replay(gameRecord.initialHands(), playIndex, rules, rolloutBot);
         int trickNumber = realGame.currentTrickNumber();
         int position = realGame.currentTrickCards().size() + 1;
         List<Card> legalMoves = realGame.legalMovesForCurrentPlayer();
         if (legalMoves.size() == 1) {
-            Outcome outcome = playOut(record, record.initialHands(), playIndex, play.card(), play.seat());
+            Outcome outcome = playOut(gameRecord, gameRecord.initialHands(), playIndex, play.card(), play.seat());
             MoveAssessment only = new MoveAssessment(play.card(), outcome.won() ? 1 : 0, outcome.eyes(),
                     outcome.won(), outcome.eyes());
-            return new DecisionReview(trickNumber, position, play.card(), Verdict.ZWANGSZUG, null,
+                return new DecisionReview(playIndex, trickNumber, position, play.card(), Verdict.ZWANGSZUG, null,
                     List.of(only), 0);
         }
 
-        List<List<List<Card>>> worlds = sampleWorlds(record, playIndex, play.seat(), random);
+        List<List<List<Card>>> worlds = sampleWorlds(gameRecord, playIndex, play.seat(), random);
         List<MoveAssessment> assessments = new ArrayList<>();
         for (Card move : legalMoves) {
             int wins = 0;
             long eyes = 0;
             for (List<List<Card>> world : worlds) {
-                Outcome outcome = playOut(record, world, playIndex, move, play.seat());
+                Outcome outcome = playOut(gameRecord, world, playIndex, move, play.seat());
                 wins += outcome.won() ? 1 : 0;
                 eyes += outcome.eyes();
             }
-            Outcome real = playOut(record, record.initialHands(), playIndex, move, play.seat());
+            Outcome real = playOut(gameRecord, gameRecord.initialHands(), playIndex, move, play.seat());
             assessments.add(new MoveAssessment(move, (double) wins / worlds.size(),
                     (double) eyes / worlds.size(), real.won(), real.eyes()));
         }
@@ -154,7 +259,7 @@ public final class PostGameAnalyzer {
         } else {
             verdict = Verdict.IN_ORDNUNG;
         }
-        return new DecisionReview(trickNumber, position, play.card(), verdict, better,
+        return new DecisionReview(playIndex, trickNumber, position, play.card(), verdict, better,
                 List.copyOf(assessments), worlds.size());
     }
 
@@ -167,8 +272,8 @@ public final class PostGameAnalyzer {
     }
 
     /** Plays one move (or none) and lets the rollout bot finish the game; returns the seat's team view. */
-    private Outcome playOut(GameRecord record, List<List<Card>> hands, int playIndex, Card move, int seat) {
-        SchafkopfGame game = record.replay(hands, playIndex, rules, rolloutBot);
+    private Outcome playOut(GameRecord gameRecord, List<List<Card>> hands, int playIndex, Card move, int seat) {
+        SchafkopfGame game = gameRecord.replay(hands, playIndex, rules, rolloutBot);
         if (move != null) {
             game.playCard(move);
         }
@@ -183,8 +288,8 @@ public final class PostGameAnalyzer {
     }
 
     /** Hands for all seats that agree with the observer's hand and every play before {@code playIndex}. */
-    List<List<List<Card>>> sampleWorlds(GameRecord record, int playIndex, int observer, Random random) {
-        GameContract contract = record.contract().bind(placeholderPlayers());
+    List<List<List<Card>>> sampleWorlds(GameRecord gameRecord, int playIndex, int observer, Random random) {
+        GameContract contract = gameRecord.contract().bind(placeholderPlayers());
         List<List<Card>> played = new ArrayList<>();
         List<Set<Category>> voids = new ArrayList<>();
         for (int seat = 0; seat < 4; seat++) {
@@ -192,12 +297,12 @@ public final class PostGameAnalyzer {
             voids.add(new HashSet<>());
         }
         Set<Card> unknown = new HashSet<>();
-        record.initialHands().forEach(unknown::addAll);
-        record.initialHands().get(observer).forEach(unknown::remove);
+        gameRecord.initialHands().forEach(unknown::addAll);
+        gameRecord.initialHands().get(observer).forEach(unknown::remove);
 
         Category led = null;
         for (int index = 0; index < playIndex; index++) {
-            GameRecord.Play play = record.plays().get(index);
+            GameRecord.Play play = gameRecord.plays().get(index);
             Category category = categoryOf(play.card(), contract);
             if (index % 4 == 0) {
                 led = category;
@@ -211,18 +316,18 @@ public final class PostGameAnalyzer {
         List<List<List<Card>>> worlds = new ArrayList<>();
         int attempts = samples * DEAL_ATTEMPTS_PER_SAMPLE;
         for (int attempt = 0; attempt < attempts && worlds.size() < samples; attempt++) {
-            List<List<Card>> world = dealUnknown(record, observer, played, voids, unknown, contract, random);
-            if (world != null && isConsistent(record, world, playIndex, contract)) {
+            List<List<Card>> world = dealUnknown(gameRecord, observer, played, voids, unknown, contract, random);
+            if (!world.isEmpty() && isConsistent(gameRecord, world, playIndex, contract)) {
                 worlds.add(world);
             }
         }
         if (worlds.isEmpty()) {
-            worlds.add(record.initialHands());
+            worlds.add(gameRecord.initialHands());
         }
         return worlds;
     }
 
-    private List<List<Card>> dealUnknown(GameRecord record, int observer, List<List<Card>> played,
+    private List<List<Card>> dealUnknown(GameRecord gameRecord, int observer, List<List<Card>> played,
                                          List<Set<Category>> voids, Set<Card> unknown, GameContract contract,
                                          Random random) {
         List<List<Card>> remaining = new ArrayList<>();
@@ -234,13 +339,13 @@ public final class PostGameAnalyzer {
         List<Card> cards = new ArrayList<>(unknown);
         Collections.shuffle(cards, random);
         cards.sort(Comparator.comparingInt(
-                card -> eligibleSeats(card, observer, voids, contract, record.contract()).size()));
+                card -> eligibleSeats(card, observer, voids, contract, gameRecord.contract()).size()));
         for (Card card : cards) {
-            List<Integer> options = eligibleSeats(card, observer, voids, contract, record.contract()).stream()
+            List<Integer> options = eligibleSeats(card, observer, voids, contract, gameRecord.contract()).stream()
                     .filter(seat -> capacity[seat] > 0)
                     .toList();
             if (options.isEmpty()) {
-                return null;
+                return List.of();
             }
             int seat = options.get(random.nextInt(options.size()));
             remaining.get(seat).add(card);
@@ -249,7 +354,7 @@ public final class PostGameAnalyzer {
         List<List<Card>> hands = new ArrayList<>();
         for (int seat = 0; seat < 4; seat++) {
             if (seat == observer) {
-                hands.add(record.initialHands().get(seat));
+                hands.add(gameRecord.initialHands().get(seat));
             } else {
                 List<Card> hand = new ArrayList<>(played.get(seat));
                 hand.addAll(remaining.get(seat));
@@ -270,10 +375,10 @@ public final class PostGameAnalyzer {
                 .toList();
     }
 
-    private boolean isConsistent(GameRecord record, List<List<Card>> world, int playIndex, GameContract contract) {
-        if (record.contract().type() == GameType.RUFSPIEL) {
-            Suit suit = record.contract().suit();
-            boolean callerHoldsCalledSuit = world.get(record.contract().callerSeat()).stream()
+    private boolean isConsistent(GameRecord gameRecord, List<List<Card>> world, int playIndex, GameContract contract) {
+        if (gameRecord.contract().type() == GameType.RUFSPIEL) {
+            Suit suit = gameRecord.contract().suit();
+            boolean callerHoldsCalledSuit = world.get(gameRecord.contract().callerSeat()).stream()
                     .anyMatch(card -> card.suit() == suit && card.rank() != Rank.SAU
                             && !contract.isTrump(card, rules));
             if (!callerHoldsCalledSuit) {
@@ -281,7 +386,7 @@ public final class PostGameAnalyzer {
             }
         }
         try {
-            record.replay(world, playIndex, rules, rolloutBot);
+            gameRecord.replay(world, playIndex, rules, rolloutBot);
             return true;
         } catch (IllegalArgumentException | IllegalStateException inconsistent) {
             return false;
@@ -298,34 +403,56 @@ public final class PostGameAnalyzer {
 
     public static String report(GameReview review) {
         StringBuilder text = new StringBuilder();
+        appendReportHeader(text, review);
+        for (DecisionReview decision : review.decisions()) {
+            appendDecisionReport(text, decision);
+        }
+        text.append('\n');
+        appendReportConclusion(text, review);
+        return text.toString();
+    }
+
+    private static void appendReportHeader(StringBuilder text, GameReview review) {
         text.append("NACHKARTELN für ").append(review.playerName()).append('\n');
         text.append(review.won() ? "Ergebnis: gewonnen" : "Ergebnis: verloren")
                 .append(" (").append(review.teamEyes()).append(" Augen für die eigene Partei)\n");
         text.append(String.format(Locale.GERMAN, "Gewinnchance beim ersten eigenen Zug (bestes Spiel): %.0f %%%n",
                 review.firstDecisionWinChance() * 100));
-        for (DecisionReview decision : review.decisions()) {
-            text.append(String.format(Locale.GERMAN, "%nStich %d, Position %d: %s – %s",
-                    decision.trickNumber(), decision.positionInTrick(), decision.played().shortName(),
-                    decision.verdict().label()));
-            if (decision.verdict() == Verdict.ZWANGSZUG) {
-                continue;
-            }
-            text.append(String.format(Locale.GERMAN, " (%d mögliche Verteilungen)%n", decision.samples()));
-            for (MoveAssessment move : decision.alternatives()) {
-                text.append(String.format(Locale.GERMAN, "   %s %-16s Gewinn %3.0f %%, Ø %5.1f Augen | echte Karten: %s, %d Augen%n",
-                        move.card().equals(decision.played()) ? "▶" : " ",
-                        move.card().shortName(), move.winRate() * 100, move.meanEyes(),
-                        move.winsWithRealCards() ? "gewonnen" : "verloren", move.eyesWithRealCards()));
-            }
-            if (decision.verdict() == Verdict.FEHLER) {
-                text.append("   → Mit dem damaligen Wissen war ").append(decision.better().card().shortName())
-                        .append(" klar besser.\n");
-            } else if (decision.verdict() == Verdict.RUECKSCHAU) {
-                text.append("   → Nur mit Kenntnis aller Karten wäre ").append(decision.better().card().shortName())
-                        .append(" besser gewesen – kein Fehler.\n");
-            }
+    }
+
+    private static void appendDecisionReport(StringBuilder text, DecisionReview decision) {
+        text.append(String.format(Locale.GERMAN, "%nStich %d, Position %d: %s – %s",
+                decision.trickNumber(), decision.positionInTrick(), decision.played().shortName(),
+                decision.verdict().label()));
+        if (decision.verdict() == Verdict.ZWANGSZUG) {
+            return;
         }
-        text.append('\n');
+        text.append(String.format(Locale.GERMAN, " (%d mögliche Verteilungen)%n", decision.samples()));
+        for (MoveAssessment move : decision.alternatives()) {
+            appendMoveReport(text, decision, move);
+        }
+        appendDecisionConclusion(text, decision);
+    }
+
+    private static void appendMoveReport(StringBuilder text, DecisionReview decision, MoveAssessment move) {
+        text.append(String.format(Locale.GERMAN,
+                "   %s %-16s Gewinn %3.0f %%, Ø %5.1f Augen | echte Karten: %s, %d Augen%n",
+                move.card().equals(decision.played()) ? "▶" : " ",
+                move.card().shortName(), move.winRate() * 100, move.meanEyes(),
+                move.winsWithRealCards() ? "gewonnen" : "verloren", move.eyesWithRealCards()));
+    }
+
+    private static void appendDecisionConclusion(StringBuilder text, DecisionReview decision) {
+        if (decision.verdict() == Verdict.FEHLER) {
+            text.append("   → Mit dem damaligen Wissen war ").append(decision.better().card().shortName())
+                    .append(" klar besser.\n");
+        } else if (decision.verdict() == Verdict.RUECKSCHAU) {
+            text.append("   → Nur mit Kenntnis aller Karten wäre ").append(decision.better().card().shortName())
+                    .append(" besser gewesen – kein Fehler.\n");
+        }
+    }
+
+    private static void appendReportConclusion(StringBuilder text, GameReview review) {
         if (review.won()) {
             text.append(review.mistakes() == 0 ? "Fazit: gewonnen ohne erkennbaren Fehler."
                     : "Fazit: gewonnen, aber mit " + review.mistakes() + " vermeidbaren Fehler(n).");
@@ -335,6 +462,5 @@ public final class PostGameAnalyzer {
                     : "Fazit: verloren mit " + review.mistakes() + " vermeidbaren Fehler(n).");
         }
         text.append("\nHinweis: Die Fortsetzungen spielt der vorhandene Bot; die Bewertung ist nur so gut wie er.\n");
-        return text.toString();
     }
 }

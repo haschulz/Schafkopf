@@ -60,6 +60,8 @@ class SchafkopfConfigTest {
         Files.writeString(configFile, "klopfen.afterCards=8\n");
 
         assertThrows(IllegalArgumentException.class, () -> SchafkopfConfig.load(configFile));
+        Files.writeString(configFile, "stock.multiplier=4\n");
+        assertThrows(IllegalArgumentException.class, () -> SchafkopfConfig.load(configFile));
         assertTrue(Files.exists(configFile));
     }
 }

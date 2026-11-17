@@ -24,6 +24,9 @@ public class SimpleBot {
     private record DecisionContext(GameMemory memory, List<Player> remainingPlayers, boolean complete) {
     }
 
+    private record FollowContext(PlayedCard currentBest, DecisionContext decision) {
+    }
+
     private final RuleEngine rules;
     private final boolean useMemoryEngine;
     private final RufspielLeadStrategy leadStrategy;
@@ -58,6 +61,7 @@ public class SimpleBot {
      * Chooses the optimal card with full tactical reasoning, memory, card accounting,
      * signaling semantics, and threshold evaluation ("Erst gewinnen, dann nachdenken").
      */
+    @SuppressWarnings("java:S107")
     public MoveExplanation chooseMove(
             Player player,
             Trick trick,
@@ -343,6 +347,7 @@ public class SimpleBot {
         };
     }
 
+        @SuppressWarnings("java:S3776")
         private Map<String, Double> cardFeatures(
             Card card,
             Player player,
@@ -481,150 +486,156 @@ public class SimpleBot {
     ) {
         PlayedCard currentBest = rules.evaluateTrickWinner(trick);
         boolean teammateWinning = isTeammate(player, currentBest.player(), contract, partner);
-
         if (teammateWinning) {
-            // BASELINE MODE (A/B Test): Naives Schmieren ohne Gedächtnis
-            if (!useMemoryEngine) {
-                Card highestPoints = legalMoves.stream()
-                        .filter(c -> !c.equals(contract.calledSau()))
-                        .max(Comparator.comparingInt(Card::points))
-                        .orElse(legalMoves.get(0));
-
-                String act = highestPoints.points() >= 10
-                        ? "Schmiert " + highestPoints.points() + " Augen (" + highestPoints.shortName() + "), da Teampartner " + currentBest.player().name() + " führt"
-                        : "Legt zu (" + highestPoints.shortName() + "), Teampartner " + currentBest.player().name() + " hat den Stich";
-                return new MoveExplanation(player, highestPoints, ruleRequirement, act, true);
-            }
-
-            // Check trick safety & ruff danger from opponents behind us
-            GameMemory memory = context.memory();
-            List<Player> remainingPlayers = context.remainingPlayers();
-            boolean isTrickSafe = memory.isTrickSafeAgainstRemainingPlayers(trick, currentBest, remainingPlayers, contract, partner);
-            boolean acuteRuffDanger = memory.acuteRuffDangerFromRemainingOpponents(trick, remainingPlayers, contract, partner);
-
-            // =========================================================================
-            // SÄULE 1: GEWINNSCHWELLEN-REGEL („Erst gewinnen, dann nachdenken“)
-            // Wenn der Stich sicher beim Team ist und die 61-Augen-Grenze erreichbar ist:
-            // KOMPROMISSLOS SCHMIEREN, auch eine blanke Farbsau!
-            // =========================================================================
-            if (isTrickSafe) {
-                int teamAugen = memory.getTeamPoints(player, contract, partner);
-                int trickAugen = trick.totalPoints();
-
-                // Look for legal cards that push team points >= 61
-                Card thresholdWinnerCard = legalMoves.stream()
-                        .filter(c -> !c.equals(contract.calledSau())) // Cannot discard called Sau
-                        .filter(c -> (teamAugen + trickAugen + c.points()) >= 61)
-                        .max(Comparator.comparingInt(Card::points))
-                        .orElse(null);
-
-                if (thresholdWinnerCard != null) {
-                    int finalPoints = teamAugen + trickAugen + thresholdWinnerCard.points();
-                    return new MoveExplanation(
-                            player,
-                            thresholdWinnerCard,
-                            ruleRequirement,
-                            String.format("GEWINNSCHWELLE ERREICHT! Team hat bisher %d Augen + %d im Stich + %d Augen (%s) = %d Augen (>= 61) -> Sieg sofort gesichert! ('Erst gewinnen, dann nachdenken')",
-                                    teamAugen, trickAugen, thresholdWinnerCard.points(), thresholdWinnerCard.shortName(), finalPoints),
-                            true
-                    );
-                }
-            }
-
-            // =========================================================================
-            // SÄULE 2: RISIKO-ABWÄGUNG BEI AKUTER ABSTICH-GEFAHR DURCH GEGNER HINTEN
-            // Wenn ein nachfolgender Gegner in der angespielten Farbe nachweislich frei ist:
-            // SCHMIEREN ABBRECHEN! Keine Punkte an den Gegner verschenken!
-            // =========================================================================
-            if (acuteRuffDanger || !isTrickSafe) {
-                Card cheapestSafeCard = legalMoves.stream()
-                        .filter(c -> !c.equals(contract.calledSau()))
-                        .min(Comparator.comparingInt(Card::points))
-                        .orElse(legalMoves.get(0));
-
-                String dangerReason = acuteRuffDanger
-                        ? "Gegner in Nachhand ist nachweislich farbfrei (akute Abstich-Gefahr!) -> Bricht Schmieren ab und wirft kleine Karte " + cheapestSafeCard.shortName() + " ab"
-                        : "Stich nicht garantiert sicher (Gegner sitzen noch dahinter) -> Schont hohe Punkte und legt " + cheapestSafeCard.shortName() + " zu";
-
-                return new MoveExplanation(player, cheapestSafeCard, ruleRequirement, dangerReason, true);
-            }
-
-            // =========================================================================
-            // SÄULE 3: SCHMIER-HIERARCHIE BEI SICHEREM STICH (Punkte < 61)
-            // 1. Blanke oder gefährdete 10 (muss weg, bevor sie abgestochen wird)
-            // 2. Reguläre 10
-            // 3. Blanke Sau (nur wenn keine Trümpfe mehr zum späteren Selbsteinholen)
-            // 4. König (4 Augen)
-            // 5. Kleine Karte
-            // =========================================================================
-            Card bestSmear = chooseBestSmearCard(player, legalMoves, contract, rules);
-            if (bestSmear.points() >= 10) {
-                return new MoveExplanation(
-                        player,
-                        bestSmear,
-                        ruleRequirement,
-                        "Schmiert " + bestSmear.points() + " Augen (" + bestSmear.shortName() + ") auf sicheren Stich von Teampartner " + currentBest.player().name(),
-                        true
-                );
-            } else {
-                return new MoveExplanation(
-                        player,
-                        bestSmear,
-                        ruleRequirement,
-                        "Legt zu (" + bestSmear.shortName() + "), Teampartner " + currentBest.player().name() + " hat den Stich sicher",
-                        true
-                );
-            }
-
-        } else {
-            // Opponent holds the trick -> try to take it ("stechen" or beat with higher suit)
-            List<Card> winningMoves = legalMoves.stream()
-                    .filter(candidate -> canBeat(candidate, currentBest.card(), trick.leadCard()))
-                    .toList();
-
-            if (!winningMoves.isEmpty()) {
-                // Pick the cheapest winning card (lowest points / lowest trump rank)
-                Card cheapestWinner = winningMoves.stream()
-                    .min(Comparator.comparingInt(Card::points)
-                        .thenComparingInt(c -> rules.isTrump(c)
-                            ? rules.getTrumpStrength(c)
-                            : rules.getSuitStrength(c)))
-                        .orElse(winningMoves.get(0));
-
-                String act = rules.isTrump(cheapestWinner) && !rules.isTrump(trick.leadCard())
-                        ? "Sticht mit Trumpf " + cheapestWinner.shortName() + " ein, um Stich von Gegner " + currentBest.player().name() + " abzuluchsen"
-                        : "Übersticht " + currentBest.player().name() + " mit höherer Karte " + cheapestWinner.shortName();
-
-                return new MoveExplanation(player, cheapestWinner, ruleRequirement, act, true);
-            } else {
-                // Cannot win the trick -> check if we can discard a card to get "freigespielt" (void in a suit)
-                if (useMemoryEngine) {
-                    Card tacticalDiscard = findTacticalFreispielenDiscard(player, legalMoves, contract, rules);
-                    if (tacticalDiscard != null) {
-                        return new MoveExplanation(
-                                player,
-                                tacticalDiscard,
-                                ruleRequirement,
-                                "Kann Stich nicht übernehmen -> wirft einzelne " + tacticalDiscard.shortName() + " ab, um sich in " + tacticalDiscard.suit().displayName() + " freizuspielen (künftig stechen!)",
-                                true
-                        );
-                    }
-                }
-
-                // Fallback: Discard cheapest possible card (0 points: 7, 8, 9)
-                Card cheapestDiscard = legalMoves.stream()
-                        .min(Comparator.comparingInt(Card::points))
-                        .orElse(legalMoves.get(0));
-
-                return new MoveExplanation(
-                        player,
-                        cheapestDiscard,
-                        ruleRequirement,
-                        "Kann Stich nicht übernehmen -> gibt kleine Karte " + cheapestDiscard.shortName() + " ab (keine Augen an Gegner)",
-                        true
-                );
-            }
+                return choosePartnerWinningFollow(player, trick, legalMoves, contract, partner, ruleRequirement,
+                    new FollowContext(currentBest, context));
         }
+            return chooseOpponentWinningFollow(player, trick, legalMoves, contract, ruleRequirement,
+                new FollowContext(currentBest, context));
+            }
+
+            private MoveExplanation choosePartnerWinningFollow(
+                Player player,
+                Trick trick,
+                List<Card> legalMoves,
+                RufspielContract contract,
+                Player partner,
+                String ruleRequirement,
+                FollowContext context
+            ) {
+            PlayedCard currentBest = context.currentBest();
+            if (!useMemoryEngine) {
+                return chooseBaselineSmear(player, legalMoves, contract, ruleRequirement, currentBest);
+            }
+
+            GameMemory memory = context.decision().memory();
+            List<Player> remainingPlayers = context.decision().remainingPlayers();
+            boolean isTrickSafe = memory.isTrickSafeAgainstRemainingPlayers(
+                trick, currentBest, remainingPlayers, contract, partner);
+            boolean acuteRuffDanger = memory.acuteRuffDangerFromRemainingOpponents(
+                trick, remainingPlayers, contract, partner);
+            if (isTrickSafe) {
+                MoveExplanation thresholdMove = chooseThresholdSmear(
+                    player, trick, legalMoves, contract, partner, ruleRequirement, memory);
+                if (thresholdMove != null) {
+                return thresholdMove;
+                }
+            }
+            if (acuteRuffDanger || !isTrickSafe) {
+                return chooseSafeDiscard(player, legalMoves, contract, ruleRequirement, acuteRuffDanger);
+            }
+            return chooseSafeSmear(player, legalMoves, contract, ruleRequirement, currentBest);
+            }
+
+            private MoveExplanation chooseBaselineSmear(
+                Player player, List<Card> legalMoves, RufspielContract contract, String ruleRequirement,
+                PlayedCard currentBest
+            ) {
+            Card highestPoints = legalMoves.stream()
+                .filter(card -> !card.equals(contract.calledSau()))
+                .max(Comparator.comparingInt(Card::points))
+                .orElse(legalMoves.get(0));
+            String action = highestPoints.points() >= 10
+                ? "Schmiert " + highestPoints.points() + " Augen (" + highestPoints.shortName()
+                    + "), da Teampartner " + currentBest.player().name() + " führt"
+                : "Legt zu (" + highestPoints.shortName() + "), Teampartner "
+                    + currentBest.player().name() + " hat den Stich";
+            return new MoveExplanation(player, highestPoints, ruleRequirement, action, true);
+            }
+
+            private MoveExplanation chooseThresholdSmear(
+                Player player, Trick trick, List<Card> legalMoves, RufspielContract contract,
+                Player partner, String ruleRequirement, GameMemory memory
+            ) {
+            int teamAugen = memory.getTeamPoints(player, contract, partner);
+            int trickAugen = trick.totalPoints();
+            Card thresholdWinnerCard = legalMoves.stream()
+                .filter(card -> !card.equals(contract.calledSau()))
+                .filter(card -> teamAugen + trickAugen + card.points() >= 61)
+                .max(Comparator.comparingInt(Card::points))
+                .orElse(null);
+            if (thresholdWinnerCard == null) {
+                return null;
+            }
+            int finalPoints = teamAugen + trickAugen + thresholdWinnerCard.points();
+            String explanation = String.format(
+                "GEWINNSCHWELLE ERREICHT! Team hat bisher %d Augen + %d im Stich + %d Augen (%s) = %d Augen (>= 61) -> Sieg sofort gesichert! ('Erst gewinnen, dann nachdenken')",
+                teamAugen, trickAugen, thresholdWinnerCard.points(), thresholdWinnerCard.shortName(), finalPoints);
+            return new MoveExplanation(player, thresholdWinnerCard, ruleRequirement, explanation, true);
+            }
+
+            private MoveExplanation chooseSafeDiscard(
+                Player player, List<Card> legalMoves, RufspielContract contract,
+                String ruleRequirement, boolean acuteRuffDanger
+            ) {
+            Card cheapestSafeCard = legalMoves.stream()
+                .filter(card -> !card.equals(contract.calledSau()))
+                .min(Comparator.comparingInt(Card::points))
+                .orElse(legalMoves.get(0));
+            String reason = acuteRuffDanger
+                ? "Gegner in Nachhand ist nachweislich farbfrei (akute Abstich-Gefahr!) -> Bricht Schmieren ab und wirft kleine Karte "
+                    + cheapestSafeCard.shortName() + " ab"
+                : "Stich nicht garantiert sicher (Gegner sitzen noch dahinter) -> Schont hohe Punkte und legt "
+                    + cheapestSafeCard.shortName() + " zu";
+            return new MoveExplanation(player, cheapestSafeCard, ruleRequirement, reason, true);
+            }
+
+            private MoveExplanation chooseSafeSmear(
+                Player player, List<Card> legalMoves, RufspielContract contract,
+                    String ruleRequirement, PlayedCard currentBest
+            ) {
+            Card bestSmear = chooseBestSmearCard(player, legalMoves, contract, rules);
+            String explanation = bestSmear.points() >= 10
+                ? "Schmiert " + bestSmear.points() + " Augen (" + bestSmear.shortName()
+                    + ") auf sicheren Stich von Teampartner " + currentBest.player().name()
+                : "Legt zu (" + bestSmear.shortName() + "), Teampartner "
+                    + currentBest.player().name() + " hat den Stich sicher";
+            return new MoveExplanation(player, bestSmear, ruleRequirement, explanation, true);
+            }
+
+            private MoveExplanation chooseOpponentWinningFollow(
+                Player player, Trick trick, List<Card> legalMoves, RufspielContract contract,
+                String ruleRequirement, FollowContext context
+            ) {
+            PlayedCard currentBest = context.currentBest();
+            List<Card> winningMoves = legalMoves.stream()
+                .filter(candidate -> canBeat(candidate, currentBest.card(), trick.leadCard()))
+                .toList();
+            if (winningMoves.isEmpty()) {
+                return chooseOpponentDiscard(player, legalMoves, contract, ruleRequirement);
+            }
+            Card cheapestWinner = winningMoves.stream()
+                .min(Comparator.comparingInt(Card::points)
+                    .thenComparingInt(card -> rules.isTrump(card)
+                        ? rules.getTrumpStrength(card)
+                        : rules.getSuitStrength(card)))
+                .orElse(winningMoves.get(0));
+            String action = rules.isTrump(cheapestWinner) && !rules.isTrump(trick.leadCard())
+                ? "Sticht mit Trumpf " + cheapestWinner.shortName() + " ein, um Stich von Gegner "
+                    + currentBest.player().name() + " abzuluchsen"
+                : "Übersticht " + currentBest.player().name() + " mit höherer Karte "
+                    + cheapestWinner.shortName();
+            return new MoveExplanation(player, cheapestWinner, ruleRequirement, action, true);
+            }
+
+            private MoveExplanation chooseOpponentDiscard(
+                Player player, List<Card> legalMoves, RufspielContract contract, String ruleRequirement
+            ) {
+            if (useMemoryEngine) {
+                Card tacticalDiscard = findTacticalFreispielenDiscard(player, legalMoves, contract, rules);
+                if (tacticalDiscard != null) {
+                return new MoveExplanation(player, tacticalDiscard, ruleRequirement,
+                    "Kann Stich nicht übernehmen -> wirft einzelne " + tacticalDiscard.shortName()
+                        + " ab, um sich in " + tacticalDiscard.suit().displayName()
+                        + " freizuspielen (künftig stechen!)", true);
+                }
+            }
+            Card cheapestDiscard = legalMoves.stream()
+                .min(Comparator.comparingInt(Card::points))
+                .orElse(legalMoves.get(0));
+            return new MoveExplanation(player, cheapestDiscard, ruleRequirement,
+                "Kann Stich nicht übernehmen -> gibt kleine Karte " + cheapestDiscard.shortName()
+                    + " ab (keine Augen an Gegner)", true);
     }
 
     private MoveExplanation chooseConservativeFollowMove(

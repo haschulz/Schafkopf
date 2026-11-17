@@ -158,7 +158,7 @@ public class SoloContract implements GameContract {
     @Override
     public String displayName() {
         return "Farbsolo" + (tout ? " Tout" : "") + " auf " + trumpSuit.displayName()
-            + " (gerufen von " + caller.name() + ")";
+            + " (gespielt von " + caller.name() + ")";
     }
 
     @Override

@@ -40,7 +40,10 @@ import java.util.stream.Collectors;
  * - Full bidding phase with scenario evaluation (Pessimistic opponent modeling).
  * - Bavarian tariff settling with long-term score ledger.
  */
+@SuppressWarnings("java:S106")
 public class InteractiveTrainingGame {
+    private static final String SEPARATOR = "==========================================================================";
+
     private record TrickContext(
             SchafkopfGame game,
             List<Player> players,
@@ -78,9 +81,9 @@ public class InteractiveTrainingGame {
     }
 
     private boolean playInteractiveRound(ScoreLedger ledger) {
-        System.out.println("==========================================================================");
+        System.out.println(SEPARATOR);
         System.out.println("       WILLKOMMEN AM SCHAFKOPF-TRAININGSTISCH (MIT OFFENEN KARTEN)        ");
-        System.out.println("==========================================================================");
+        System.out.println(SEPARATOR);
         System.out.println("Du spielst als Spieler 4 ('Du') zusammen mit:");
         System.out.println(" - Spieler 1: Sepp (Bot - " + Personality.MAURER.description() + ")");
         System.out.println(" - Spieler 2: Hans (Bot - " + Personality.SOLIDE.description() + ")");
@@ -333,9 +336,9 @@ public class InteractiveTrainingGame {
     }
 
     private void settleTrainingGame(SchafkopfGame game, List<Player> players, ScoreLedger ledger, Player user) {
-        System.out.println("\n==========================================================================");
+        System.out.println("\n" + SEPARATOR);
         System.out.println("                     ENDSTAND & TARIF-ABRECHNUNG                          ");
-        System.out.println("==========================================================================");
+        System.out.println(SEPARATOR);
         GameResult result = game.finishGame();
         System.out.println(result.summary());
         List<Player> winners = result.callerTeamWon() ? result.callerTeam() : result.defenderTeam();
@@ -406,9 +409,12 @@ public class InteractiveTrainingGame {
         System.out.println("Alle Spieler haben Weiter gesagt. Regel für 'keiner spielt': " + config.noGamePolicy());
         return switch (config.noGamePolicy()) {
             case STOCK -> {
-                ledger.addStock(config.stockMultiplier());
-                System.out.println("Stock: nächste gespielte Runde wird mit Faktor "
-                        + ledger.pendingStockMultiplier() + " abgerechnet.");
+                if (ledger.addStock(config.stockMultiplier())) {
+                    System.out.println("Stock: nächste gespielte Runde wird mit Faktor "
+                            + ledger.pendingStockMultiplier() + " abgerechnet.");
+                } else {
+                    System.out.println("Max. Stock erreicht!");
+                }
                 yield null;
             }
             case ZAMMWERFEN -> {
@@ -436,31 +442,45 @@ public class InteractiveTrainingGame {
         };
     }
 
-    private void resolveKontraAndRe(SchafkopfGame game, Player user) {
+    void resolveKontraAndRe(SchafkopfGame game, Player user) {
         if (!config.kontraEnabled() && !config.reEnabled()) {
             return;
         }
-
         List<Player> callerTeam = declarationSide(game);
         if (callerTeam.isEmpty()) {
             return;
         }
         boolean userOnCallerSide = callerTeam.contains(user);
-        boolean kontraCalled = false;
-        if (config.kontraEnabled()) {
-            boolean botContra = game.players().stream()
-                    .filter(player -> !player.equals(user) && !callerTeam.contains(player))
-                    .anyMatch(player -> shouldDouble(player, game.gameContract()));
-            if (botContra) {
-                kontraCalled = game.bettingState().callKontra();
-                System.out.println("Gegner sagt Kontra!");
-            } else if (!userOnCallerSide) {
-                System.out.print("Möchtest du Kontra geben? [j/n]: ");
-                kontraCalled = isYes(readInput()) && game.bettingState().callKontra();
-            }
+        if (!resolveKontra(game, user, callerTeam, userOnCallerSide)) {
+            return;
         }
+        resolveRetour(game, user, callerTeam, userOnCallerSide);
+    }
 
-        if (!kontraCalled || !config.reEnabled()) {
+    private boolean resolveKontra(
+            SchafkopfGame game, Player user, List<Player> callerTeam, boolean userOnCallerSide
+    ) {
+        if (!config.kontraEnabled()) {
+            return false;
+        }
+        boolean botContra = game.players().stream()
+                .filter(player -> !player.equals(user) && !callerTeam.contains(player))
+                .anyMatch(player -> shouldDouble(player, game.gameContract()));
+        if (botContra) {
+            System.out.println("Gegner sagt Kontra!");
+            return game.bettingState().callKontra();
+        }
+        if (!userOnCallerSide) {
+            System.out.print("Möchtest du Kontra geben? [j/n]: ");
+            return isYes(readInput()) && game.bettingState().callKontra();
+        }
+        return false;
+    }
+
+    private void resolveRetour(
+            SchafkopfGame game, Player user, List<Player> callerTeam, boolean userOnCallerSide
+    ) {
+        if (!config.reEnabled()) {
             return;
         }
         boolean botRe = game.players().stream()
@@ -509,9 +529,9 @@ public class InteractiveTrainingGame {
         for (Player p : players) {
             long trumps = p.hand().stream().filter(rules::isTrump).count();
             String cardsStr = p.hand().stream().map(Card::shortName).collect(Collectors.joining(", "));
-            System.out.printf("%-18s (%d Trümpfe): [%s]\n", p.name(), trumps, cardsStr);
+            System.out.printf("%-18s (%d Trümpfe): [%s]%n", p.name(), trumps, cardsStr);
         }
-        System.out.println("==========================================================================\n");
+        System.out.println(SEPARATOR + "\n");
     }
 
     private Card promptUserCardChoice(List<Card> legalMoves, Card coachRec) {
@@ -522,12 +542,15 @@ public class InteractiveTrainingGame {
             return coachRec;
         }
 
+        int idx;
         try {
-            int idx = Integer.parseInt(input) - 1;
-            if (idx >= 0 && idx < legalMoves.size()) {
-                return legalMoves.get(idx);
-            }
-        } catch (NumberFormatException ignored) {}
+            idx = Integer.parseInt(input) - 1;
+        } catch (NumberFormatException ignored) {
+            idx = -1;
+        }
+        if (idx >= 0 && idx < legalMoves.size()) {
+            return legalMoves.get(idx);
+        }
 
         System.out.println("   (Ungültige Eingabe -> Coach-Tipp übernommen)");
         return coachRec;

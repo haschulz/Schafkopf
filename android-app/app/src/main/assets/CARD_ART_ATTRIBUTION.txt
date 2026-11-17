@@ -1,0 +1,44 @@
+Bavarian card artwork reference
+
+Reference: "German Bavarian Pattern Deck.jpg"
+Author: S s47
+Source: https://commons.wikimedia.org/wiki/File:German_Bavarian_Pattern_Deck.jpg
+License: Creative Commons Attribution-ShareAlike 4.0 International
+License URL: https://creativecommons.org/licenses/by-sa/4.0/
+
+The vector card artwork in schafkopf.android.CardArt is an original adaptation
+inspired by the suit colors, double-ended court-card layout, and ornamental
+framing shown in the reference. The reference photograph itself is not included
+in the application. Changes include new vector suit signs, mirrored court
+figures, a custom card back, and removal of the sixes to match the game's
+32-card deck. The adapted card artwork is made available under CC BY-SA 4.0.
+
+Card fronts supplied by the user
+
+Source: 4x8 card-sheet image supplied as 37a8edbe-2bd1-4ad9-bc6f-50a69a487bc0.webp
+Author: User (confirmed self-created)
+Use: The 32 card fronts are cropped from the user's original artwork for this app.
+
+Wikimedia suit symbol references
+
+Bay gras.svg
+Author: Infanf
+Source: https://commons.wikimedia.org/wiki/File:Bay_gras.svg
+
+Bay eichel.svg
+Author: Infanf
+Source: https://en.wikipedia.org/wiki/File:Bay_eichel.svg
+
+Bay schellen.svg
+Author: Infanf
+Source: https://commons.wikimedia.org/wiki/File:Bay_schellen.svg
+
+Bay herz.svg
+Author: Infanf
+Source: https://de.wikipedia.org/wiki/Datei:Bay_herz.svg
+
+Wikimedia marks each symbol public domain in its country of origin and
+countries applying a life-plus-70-years-or-less copyright term. The SVGs are
+rasterized as transparent PNG resources in drawable-nodpi. These symbols replace
+the suit indices in both corners and the inner pips on number cards. The SVG
+source code itself is not included in the app.

@@ -1,6 +1,5 @@
 package schafkopf.android;
 
-import java.util.Comparator;
 import java.util.List;
 
 import schafkopf.model.Card;
@@ -24,6 +23,10 @@ public final class HandDisplayOrder {
         return cards.stream().sorted((first, second) -> compareStrength(first, second, contract)).toList();
     }
 
+    public static List<Card> sortForStage(List<Card> cards, GameContract contract, boolean contractClosed) {
+        return contractClosed && contract != null ? sortForContract(cards, contract) : sortForRufspiel(cards);
+    }
+
     private static int compareStrength(Card first, Card second, GameContract contract) {
         boolean firstTrump = contract.isTrump(first, RULES);
         boolean secondTrump = contract.isTrump(second, RULES);
@@ -45,8 +48,8 @@ public final class HandDisplayOrder {
         return switch (suit) {
             case EICHEL -> 0;
             case GRAS -> 1;
-            case SCHELLEN -> 2;
-            case HERZ -> 3;
+            case HERZ -> 2;
+            case SCHELLEN -> 3;
         };
     }
 }

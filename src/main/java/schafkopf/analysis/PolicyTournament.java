@@ -61,38 +61,44 @@ public final class PolicyTournament {
         }
 
         private boolean isValidDeal(List<Player> players) {
+            return switch (gameType) {
+                case RUFSPIEL -> isValidRufspielDeal(players);
+                case FARBSOLO, WENZ, GEIER, FARBWENZ, BETTEL -> isValidSoloRole();
+                case KREUZBOCK -> isValidKreuzbockRole();
+                default -> true;
+            };
+        }
+
+        private boolean isValidRufspielDeal(List<Player> players) {
             Player focal = players.get(focalSeat);
-            if (gameType == GameType.RUFSPIEL) {
-                Player caller = players.get(callerSeat);
-                Card calledSau = new Card(calledSuit, Rank.SAU);
-                boolean validCaller = !caller.hasCard(calledSau) && caller.hand().stream().anyMatch(card ->
-                        card.suit() == calledSuit && card.rank() != Rank.SAU
-                                && card.rank() != Rank.OBER && card.rank() != Rank.UNTER);
-                if (!validCaller) {
-                    return false;
-                }
-                if (requiredRole == null) {
-                    return true;
-                }
-                return switch (requiredRole) {
-                    case RUFSPIEL_CALLER -> focalSeat == callerSeat;
-                    case RUFSPIEL_PARTNER -> focalSeat != callerSeat && focal.hasCard(calledSau);
-                    case DEFENDER -> focalSeat != callerSeat && !focal.hasCard(calledSau);
-                    default -> true;
-                };
+            Player caller = players.get(callerSeat);
+            Card calledSau = new Card(calledSuit, Rank.SAU);
+            boolean validCaller = !caller.hasCard(calledSau) && caller.hand().stream().anyMatch(card ->
+                    card.suit() == calledSuit && card.rank() != Rank.SAU
+                            && card.rank() != Rank.OBER && card.rank() != Rank.UNTER);
+            if (!validCaller) {
+                return false;
             }
-            if (gameType == GameType.FARBSOLO || gameType == GameType.WENZ
-                    || gameType == GameType.GEIER || gameType == GameType.FARBWENZ
-                    || gameType == GameType.BETTEL) {
-                return requiredRole == PlayerRole.SOLOIST ? focalSeat == callerSeat
-                        : requiredRole != PlayerRole.DEFENDER || focalSeat != callerSeat;
+            if (requiredRole == null) {
+                return true;
             }
-            if (gameType == GameType.KREUZBOCK) {
-                return requiredRole == null || (focalSeat % 2 == 0
-                        ? requiredRole == PlayerRole.KREUZBOCK_TEAM_A
-                        : requiredRole == PlayerRole.KREUZBOCK_TEAM_B);
-            }
-            return true;
+            return switch (requiredRole) {
+                case RUFSPIEL_CALLER -> focalSeat == callerSeat;
+                case RUFSPIEL_PARTNER -> focalSeat != callerSeat && focal.hasCard(calledSau);
+                case DEFENDER -> focalSeat != callerSeat && !focal.hasCard(calledSau);
+                default -> true;
+            };
+        }
+
+        private boolean isValidSoloRole() {
+            return requiredRole == PlayerRole.SOLOIST ? focalSeat == callerSeat
+                    : requiredRole != PlayerRole.DEFENDER || focalSeat != callerSeat;
+        }
+
+        private boolean isValidKreuzbockRole() {
+            return requiredRole == null || (focalSeat % 2 == 0
+                    ? requiredRole == PlayerRole.KREUZBOCK_TEAM_A
+                    : requiredRole == PlayerRole.KREUZBOCK_TEAM_B);
         }
     }
     private static final double OVERALL_TAIL_PENALTY = 0.10;
@@ -118,6 +124,21 @@ public final class PolicyTournament {
             netCentsByGenome = Map.copyOf(netCentsByGenome);
             rolesByGenome = Map.copyOf(rolesByGenome);
         }
+    }
+
+    private record PreparedDeal(
+            List<Player> players,
+            SchafkopfGame game,
+            Map<String, Integer> genomeIndexByPlayerId,
+            Map<Integer, GameBiddingAdvisor> biddingAdvisors,
+            Map<Integer, BiddingAdvisor> klopfenAdvisors
+    ) {
+    }
+
+    private record ContractSelection(GameContract contract, int stockMultiplier) {
+    }
+
+    private record GameAttempt(MatchResult matchResult, int stockMultiplier) {
     }
 
     public record CandidateFitness(
@@ -208,7 +229,7 @@ public final class PolicyTournament {
                     int startingSeat = Math.floorMod(focalIndex + repetition, 4);
                     List<Integer> genomeAtSeat = assignSeats(populationSize, focalIndex, focalSeat);
                     long dealSeed = seed + repetition;
-                            MatchResult match = playGame(population, genomeAtSeat, startingSeat, dealSeed, null, true);
+                            MatchResult match = playGame(population, genomeAtSeat, startingSeat, dealSeed, null);
                             Map<Integer, Long> netForGame = match.netCentsByGenome();
                     for (int seat = 0; seat < 4; seat++) {
                         int genomeIndex = genomeAtSeat.get(seat);
@@ -307,7 +328,8 @@ public final class PolicyTournament {
                 callerSeat, genomeAtSeat.indexOf(0), null, startingSeat, dealSeed);
             }
 
-            public MatchResult runFixedContractMatch(
+    @SuppressWarnings("java:S107")
+    public MatchResult runFixedContractMatch(
                 List<PolicyGenome> population,
                 List<Integer> genomeAtSeat,
                 GameType gameType,
@@ -331,7 +353,7 @@ public final class PolicyTournament {
         FixedContract fixedContract = new FixedContract(
                 gameType, gameType == GameType.RUFSPIEL ? null : suit,
             gameType == GameType.RUFSPIEL ? suit : null, callerSeat, focalSeat, requiredRole);
-        return playGame(population, genomeAtSeat, startingSeat, dealSeed, fixedContract, false);
+        return playGame(population, genomeAtSeat, startingSeat, dealSeed, fixedContract);
     }
 
         public MatchResult runMatchDetailed(
@@ -341,7 +363,7 @@ public final class PolicyTournament {
             long dealSeed
         ) {
             validateMatch(population, genomeAtSeat, startingSeat);
-            return playGame(population, genomeAtSeat, startingSeat, dealSeed, null, true);
+            return playGame(population, genomeAtSeat, startingSeat, dealSeed, null);
         }
 
         private void validateMatch(List<PolicyGenome> population, List<Integer> genomeAtSeat, int startingSeat) {
@@ -384,88 +406,127 @@ public final class PolicyTournament {
             List<Integer> genomeAtSeat,
             int startingSeat,
             long dealSeed,
-            FixedContract fixedContract,
-            boolean applyKlopfen
+            FixedContract fixedContract
     ) {
         int stockMultiplier = 1;
-        SchafkopfGame game;
-        GameResult result;
-        List<Player> players = null;
-        Map<String, Integer> genomeIndexByPlayerId = new HashMap<>();
         for (int redeal = 0; ; redeal++) {
-            players = createPlayers();
-            List<Player> gamePlayers = players;
-            Deck deck = new Deck();
-            deck.shuffle(new Random(dealSeed + redeal));
-
-            genomeIndexByPlayerId.clear();
-            Map<Integer, GameBiddingAdvisor> biddingAdvisors = new HashMap<>();
-            Map<Integer, BiddingAdvisor> klopfenAdvisors = new HashMap<>();
-            Map<Integer, SimpleBot> bots = new HashMap<>();
-            for (int seat = 0; seat < 4; seat++) {
-                int genomeIndex = genomeAtSeat.get(seat);
-                PolicyGenome genome = population.get(genomeIndex);
-                genomeIndexByPlayerId.put(players.get(seat).id(), genomeIndex);
-                biddingAdvisors.put(seat, new GameBiddingAdvisor(rules, genome, traceSink));
-                klopfenAdvisors.put(seat, new BiddingAdvisor(rules, genome, traceSink));
-                bots.put(seat, new SimpleBot(rules, true, genome, traceSink));
+                GameAttempt attempt = playGameAttempt(population, genomeAtSeat, startingSeat, dealSeed + redeal,
+                        redeal, fixedContract, stockMultiplier);
+            if (attempt.matchResult() != null) {
+                return attempt.matchResult();
             }
-
-                game = new SchafkopfGame(gamePlayers, rules,
-                    player -> bots.get(gamePlayers.indexOf(player)), config);
-            game.setLogger(ignored -> { });
-            game.setCustomHands(deck.deal4x8());
-            if (fixedContract != null && !fixedContract.isValidDeal(players)) {
-                if (redeal >= 1000) {
-                    throw new IllegalStateException("Could not deal a valid fixed-contract role after 1000 redeals");
-                }
-                continue;
+            if (fixedContract != null && redeal >= 1000) {
+                throw new IllegalStateException("Could not deal a valid fixed-contract role after 1000 redeals");
             }
-            for (Player player : players) {
-                int seat = players.indexOf(player);
-                if (applyKlopfen && config.klopfenEnabled() && klopfenAdvisors.get(seat).shouldKlopfen(player,
-                        player.hand().subList(0, config.klopfenAfterCards()), rules)) {
-                    game.bettingState().applyDouble(player);
-                }
-            }
-
-                GameContract contract = fixedContract == null
-                    ? chooseContract(players, biddingAdvisors, startingSeat)
-                    : fixedContract.create(players);
-                if (contract == null && (redeal >= MAX_CONSECUTIVE_REDEALS
-                    || config.noGamePolicy() == SchafkopfConfig.NoGamePolicy.RAMSCH)) {
-                contract = new RamschContract();
-            } else if (contract == null && config.noGamePolicy() == SchafkopfConfig.NoGamePolicy.STOCK) {
-                stockMultiplier = Math.multiplyExact(stockMultiplier, config.stockMultiplier());
-            } else if (contract == null && config.noGamePolicy() == SchafkopfConfig.NoGamePolicy.KREUZBOCK) {
-                contract = new KreuzbockContract();
-            } else if (contract == null && config.noGamePolicy() == SchafkopfConfig.NoGamePolicy.MUSS_SPIEL) {
-                contract = createMussContract(players);
-            }
-            if (contract == null) {
-                continue;
-            }
-
-            game.setupContract(contract);
-            if (stockMultiplier > 1) {
-                game.bettingState().applyStock(stockMultiplier);
-            }
-            result = game.playFullGame(players.get(startingSeat));
-            break;
+            stockMultiplier = attempt.stockMultiplier();
         }
-        int amountPerPlayer = tariff.calculatePayment(game).totalCentsPerPlayer();
+    }
+
+    private GameAttempt playGameAttempt(
+            List<PolicyGenome> population,
+            List<Integer> genomeAtSeat,
+            int startingSeat,
+            long attemptSeed,
+            int redeal,
+            FixedContract fixedContract,
+            int stockMultiplier
+    ) {
+        PreparedDeal deal = prepareDeal(population, genomeAtSeat, attemptSeed);
+        if (fixedContract != null && !fixedContract.isValidDeal(deal.players())) {
+            return new GameAttempt(null, stockMultiplier);
+        }
+        applyKlopfen(deal, fixedContract == null);
+        ContractSelection selection = selectContract(deal, startingSeat, redeal, fixedContract, stockMultiplier);
+        if (selection.contract() == null) {
+            return new GameAttempt(null, selection.stockMultiplier());
+        }
+
+        deal.game().setupContract(selection.contract());
+        if (selection.stockMultiplier() > 1) {
+            deal.game().bettingState().applyStock(selection.stockMultiplier());
+        }
+        GameResult result = deal.game().playFullGame(deal.players().get(startingSeat));
+        return new GameAttempt(createMatchResult(deal, result), selection.stockMultiplier());
+    }
+
+    private PreparedDeal prepareDeal(
+            List<PolicyGenome> population, List<Integer> genomeAtSeat, long dealSeed
+    ) {
+        List<Player> players = createPlayers();
+        Deck deck = new Deck();
+        deck.shuffle(new Random(dealSeed));
+        Map<String, Integer> genomeIndexByPlayerId = new HashMap<>();
+        Map<Integer, GameBiddingAdvisor> biddingAdvisors = new HashMap<>();
+        Map<Integer, BiddingAdvisor> klopfenAdvisors = new HashMap<>();
+        Map<Integer, SimpleBot> bots = new HashMap<>();
+        for (int seat = 0; seat < 4; seat++) {
+            int genomeIndex = genomeAtSeat.get(seat);
+            PolicyGenome genome = population.get(genomeIndex);
+            genomeIndexByPlayerId.put(players.get(seat).id(), genomeIndex);
+            biddingAdvisors.put(seat, new GameBiddingAdvisor(rules, genome, traceSink));
+            klopfenAdvisors.put(seat, new BiddingAdvisor(rules, genome, traceSink));
+            bots.put(seat, new SimpleBot(rules, true, genome, traceSink));
+        }
+        SchafkopfGame game = new SchafkopfGame(players, rules,
+                player -> bots.get(players.indexOf(player)), config);
+        game.setLogger(ignored -> { });
+        game.setCustomHands(deck.deal4x8());
+        return new PreparedDeal(players, game, genomeIndexByPlayerId, biddingAdvisors, klopfenAdvisors);
+    }
+
+    private void applyKlopfen(PreparedDeal deal, boolean enabled) {
+        if (!enabled || !config.klopfenEnabled()) {
+            return;
+        }
+        for (Player player : deal.players()) {
+            int seat = deal.players().indexOf(player);
+            if (deal.klopfenAdvisors().get(seat).shouldKlopfen(player,
+                    player.hand().subList(0, config.klopfenAfterCards()), rules)) {
+                deal.game().bettingState().applyDouble(player);
+            }
+        }
+    }
+
+    private ContractSelection selectContract(
+            PreparedDeal deal,
+            int startingSeat,
+            int redeal,
+            FixedContract fixedContract,
+            int stockMultiplier
+    ) {
+        GameContract contract = fixedContract == null
+                ? chooseContract(deal.players(), deal.biddingAdvisors(), startingSeat)
+                : fixedContract.create(deal.players());
+        if (contract != null) {
+            return new ContractSelection(contract, stockMultiplier);
+        }
+        if (redeal >= MAX_CONSECUTIVE_REDEALS || config.noGamePolicy() == SchafkopfConfig.NoGamePolicy.RAMSCH) {
+            return new ContractSelection(new RamschContract(), stockMultiplier);
+        }
+        if (config.noGamePolicy() == SchafkopfConfig.NoGamePolicy.STOCK) {
+            stockMultiplier = Math.min(32, Math.multiplyExact(stockMultiplier, config.stockMultiplier()));
+        } else if (config.noGamePolicy() == SchafkopfConfig.NoGamePolicy.KREUZBOCK) {
+            contract = new KreuzbockContract();
+        } else if (config.noGamePolicy() == SchafkopfConfig.NoGamePolicy.MUSS_SPIEL) {
+            contract = createMussContract(deal.players());
+        }
+        return new ContractSelection(contract, stockMultiplier);
+    }
+
+    private MatchResult createMatchResult(PreparedDeal deal, GameResult result) {
+        int amountPerPlayer = tariff.calculatePayment(deal.game()).totalCentsPerPlayer();
         List<Player> winners = result.callerTeamWon() ? result.callerTeam() : result.defenderTeam();
         List<Player> losers = result.callerTeamWon() ? result.defenderTeam() : result.callerTeam();
 
         Map<Integer, Long> returns = new HashMap<>();
         Map<Integer, PlayerRole> roles = new HashMap<>();
-        for (Player player : players) {
-            int genomeIndex = genomeIndexByPlayerId.get(player.id());
+        for (Player player : deal.players()) {
+            int genomeIndex = deal.genomeIndexByPlayerId().get(player.id());
             long net = winners.contains(player)
                     ? (long) amountPerPlayer * losers.size()
                     : -(long) amountPerPlayer * winners.size();
             returns.put(genomeIndex, net);
-            roles.put(genomeIndex, roleOf(player, game, result));
+            roles.put(genomeIndex, roleOf(player, deal.game(), result));
         }
         return new MatchResult(result.contract().gameType(), returns, roles);
     }

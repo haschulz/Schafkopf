@@ -38,6 +38,6 @@ public record BettelContract(Player caller) implements GameContract {
 
     @Override
     public String displayName() {
-        return "Bettel (gerufen von " + caller.name() + ")";
+        return "Bettel (gespielt von " + caller.name() + ")";
     }
 }

@@ -155,30 +155,10 @@ public record ContractValueModel(
         }
 
         for (int pivot = 0; pivot < dimension; pivot++) {
-            int bestRow = pivot;
-            for (int row = pivot + 1; row < dimension; row++) {
-                if (Math.abs(augmented[row][pivot]) > Math.abs(augmented[bestRow][pivot])) {
-                    bestRow = row;
-                }
-            }
-            if (Math.abs(augmented[bestRow][pivot]) < 1e-12) {
-                throw new IllegalArgumentException("Singular calibration data; use positive ridge strength");
-            }
-            double[] swap = augmented[pivot];
-            augmented[pivot] = augmented[bestRow];
-            augmented[bestRow] = swap;
-
-            double pivotValue = augmented[pivot][pivot];
-            for (int column = pivot; column <= dimension; column++) {
-                augmented[pivot][column] /= pivotValue;
-            }
-            for (int row = 0; row < dimension; row++) {
-                if (row == pivot) continue;
-                double factor = augmented[row][pivot];
-                for (int column = pivot; column <= dimension; column++) {
-                    augmented[row][column] -= factor * augmented[pivot][column];
-                }
-            }
+            int bestRow = selectPivotRow(augmented, pivot, dimension);
+            swapRows(augmented, pivot, bestRow);
+            normalizePivotRow(augmented, pivot, dimension);
+            eliminatePivotColumn(augmented, pivot, dimension);
         }
 
         double[] solution = new double[dimension];
@@ -186,6 +166,44 @@ public record ContractValueModel(
             solution[index] = augmented[index][dimension];
         }
         return solution;
+    }
+
+    private static int selectPivotRow(double[][] augmented, int pivot, int dimension) {
+        int bestRow = pivot;
+        for (int row = pivot + 1; row < dimension; row++) {
+            if (Math.abs(augmented[row][pivot]) > Math.abs(augmented[bestRow][pivot])) {
+                bestRow = row;
+            }
+        }
+        if (Math.abs(augmented[bestRow][pivot]) < 1e-12) {
+            throw new IllegalArgumentException("Singular calibration data; use positive ridge strength");
+        }
+        return bestRow;
+    }
+
+    private static void swapRows(double[][] matrix, int first, int second) {
+        double[] swap = matrix[first];
+        matrix[first] = matrix[second];
+        matrix[second] = swap;
+    }
+
+    private static void normalizePivotRow(double[][] augmented, int pivot, int dimension) {
+        double pivotValue = augmented[pivot][pivot];
+        for (int column = pivot; column <= dimension; column++) {
+            augmented[pivot][column] /= pivotValue;
+        }
+    }
+
+    private static void eliminatePivotColumn(double[][] augmented, int pivot, int dimension) {
+        for (int row = 0; row < dimension; row++) {
+            if (row == pivot) {
+                continue;
+            }
+            double factor = augmented[row][pivot];
+            for (int column = pivot; column <= dimension; column++) {
+                augmented[row][column] -= factor * augmented[pivot][column];
+            }
+        }
     }
 
     public void save(Path path) {

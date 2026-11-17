@@ -1,18 +1,9 @@
 package schafkopf.model;
 
-import java.util.Objects;
-
 /** Standard Geier contract: only the four Ober cards are trump. */
-public final class GeierContract implements GameContract {
-    private final Player caller;
-
-    public GeierContract(Player caller) {
-        this.caller = Objects.requireNonNull(caller, "Caller must not be null");
-    }
-
-    @Override
-    public Player caller() {
-        return caller;
+public record GeierContract(Player caller) implements GameContract {
+    public GeierContract {
+        java.util.Objects.requireNonNull(caller, "Caller must not be null");
     }
 
     @Override
@@ -57,6 +48,6 @@ public final class GeierContract implements GameContract {
 
     @Override
     public String displayName() {
-        return "Geier (gerufen von " + caller.name() + ")";
+        return "Geier (gespielt von " + caller.name() + ")";
     }
 }

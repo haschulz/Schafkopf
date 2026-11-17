@@ -2,14 +2,28 @@ package schafkopf.model;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Random;
+import java.util.Set;
 
 public class Deck {
     private final List<Card> cards = new ArrayList<>();
 
     public Deck() {
         reset();
+    }
+
+    public Deck(List<Card> orderedCards) {
+        reset();
+        Objects.requireNonNull(orderedCards, "Deck order must not be null");
+        if (orderedCards.size() != 32 || new HashSet<>(orderedCards).size() != 32
+                || !new HashSet<>(cards).equals(Set.copyOf(orderedCards))) {
+            throw new IllegalArgumentException("Deck order must contain each card exactly once");
+        }
+        cards.clear();
+        cards.addAll(orderedCards);
     }
 
     public void reset() {

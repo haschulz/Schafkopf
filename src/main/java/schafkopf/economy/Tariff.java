@@ -70,61 +70,89 @@ public class Tariff {
             String description
     ) {}
 
+    private record PaymentAmounts(
+            int baseCents,
+            int schneiderCents,
+            int schwarzCents,
+            int laufendeCount,
+            int laufendeCents,
+            int jungfrauCount,
+            int jungfrauMultiplier,
+            boolean durchmarsch,
+            int totalCentsPerPlayer
+    ) {}
+
     public PaymentBreakdown calculatePayment(SchafkopfGame game) {
         GameResult res = game.result();
-        boolean callerWon = res.callerTeamWon();
-        boolean ramsch = res.contract().gameType() == GameType.RAMSCH;
-        boolean durchmarsch = ramsch && res.callerTeam().size() == 1
-            && res.callerTeamAugen() > 90;
-
-        int baseGameAmount = durchmarsch ? soloTariffCents : gameBaseAmount(res.contract().gameType());
-        int schneiderAmount = res.isSchneider() && game.schneiderPaid() ? schneiderBonusCents : 0;
-        int schwarzAmount = res.isSchwarz() && game.schwarzClaimed() ? schwarzBonusCents : 0;
-
-        // Calculate Laufende (consecutive top trumps held by winning or losing team)
-        int laufende = countLaufende(game);
-        int minimumLaufende = minimumLaufende(res.contract().gameType());
-        int laufendeUnit = halfLaufende ? laufendeBonusCents / 2 : laufendeBonusCents;
-        int laufendeAmount = laufende >= minimumLaufende ? laufende * laufendeUnit : 0;
-
-        int subtotal = baseGameAmount + schneiderAmount + schwarzAmount + laufendeAmount;
-        int jungfrauCount = ramsch && !durchmarsch
-            ? (int) game.players().stream().filter(player -> player.wonTricks().isEmpty()).count()
-            : 0;
-        int jungfrauMultiplier = 1 << jungfrauCount;
-        int totalPerPlayer = Math.multiplyExact(
-            Math.multiplyExact(subtotal, game.bettingState().multiplier()), jungfrauMultiplier);
-
-        String desc;
-        if (durchmarsch) {
-            desc = String.format("Durchmarsch: Solo-Tarif %d ct x %d = %d ct pro Spieler",
-                baseGameAmount, game.bettingState().multiplier(), totalPerPlayer);
-        } else if (jungfrauCount > 0) {
-            desc = String.format("%s: %d Jungfrau(en), Tarif x %d = %d ct pro Spieler",
-                res.contract().displayName(), jungfrauCount,
-                game.bettingState().multiplier() * jungfrauMultiplier, totalPerPlayer);
-        } else {
-            desc = String.format("%s: %d ct%s%s%s x %d = %d ct pro Spieler",
-                res.contract().displayName(), baseGameAmount,
-                (schneiderAmount > 0 ? " + Schneider (" + schneiderAmount + " ct)" : ""),
-                (schwarzAmount > 0 ? " + Schwarz (" + schwarzAmount + " ct)" : ""),
-                (laufendeAmount > 0 ? " + " + laufende + " Laufende (" + laufendeAmount + " ct)" : ""),
-                game.bettingState().multiplier(), totalPerPlayer);
-        }
-
+        PaymentAmounts amounts = calculateAmounts(game, res);
         return new PaymentBreakdown(
-                baseGameAmount,
-                schneiderAmount,
-                schwarzAmount,
-                laufende,
-                laufendeAmount,
-                jungfrauCount,
-                jungfrauMultiplier,
-                durchmarsch,
-                totalPerPlayer,
-                callerWon,
-                desc
+                amounts.baseCents(), amounts.schneiderCents(), amounts.schwarzCents(),
+                amounts.laufendeCount(), amounts.laufendeCents(), amounts.jungfrauCount(),
+                amounts.jungfrauMultiplier(), amounts.durchmarsch(), amounts.totalCentsPerPlayer(),
+                res.callerTeamWon(), describePayment(game, amounts)
         );
+    }
+
+    private PaymentAmounts calculateAmounts(SchafkopfGame game, GameResult result) {
+        boolean tout = result.contract().isTout();
+        boolean durchmarsch = isDurchmarsch(result);
+        int baseCents = baseCents(result.contract().gameType(), durchmarsch, tout);
+        int schneiderCents = tout || !result.isSchneider() || !game.schneiderPaid() ? 0 : schneiderBonusCents;
+        int schwarzCents = tout || !result.isSchwarz() || !game.schwarzClaimed() ? 0 : schwarzBonusCents;
+        int laufende = countLaufende(game);
+        int laufendeCents = laufendeCents(result, laufende, tout);
+        int jungfrauCount = jungfrauCount(game, result, durchmarsch);
+        int jungfrauMultiplier = 1 << jungfrauCount;
+        int subtotal = baseCents + schneiderCents + schwarzCents + laufendeCents;
+        int total = Math.multiplyExact(
+                Math.multiplyExact(subtotal, game.bettingState().multiplier()), jungfrauMultiplier);
+        return new PaymentAmounts(baseCents, schneiderCents, schwarzCents, laufende, laufendeCents,
+                jungfrauCount, jungfrauMultiplier, durchmarsch, total);
+    }
+
+    private boolean isDurchmarsch(GameResult result) {
+        return result.contract().gameType() == GameType.RAMSCH
+                && result.callerTeam().size() == 1 && result.callerTeamAugen() > 90;
+    }
+
+    private int baseCents(GameType gameType, boolean durchmarsch, boolean tout) {
+        int base = durchmarsch ? soloTariffCents : gameBaseAmount(gameType);
+        return Math.multiplyExact(base, tout ? 2 : 1);
+    }
+
+    private int laufendeCents(GameResult result, int laufende, boolean tout) {
+        if (laufende < minimumLaufende(result.contract().gameType())) {
+            return 0;
+        }
+        int unit = halfLaufende ? laufendeBonusCents / 2 : laufendeBonusCents;
+        return Math.multiplyExact(Math.multiplyExact(laufende, unit), tout ? 2 : 1);
+    }
+
+    private int jungfrauCount(SchafkopfGame game, GameResult result, boolean durchmarsch) {
+        if (result.contract().gameType() != GameType.RAMSCH || durchmarsch) {
+            return 0;
+        }
+        return (int) game.players().stream().filter(player -> player.wonTricks().isEmpty()).count();
+    }
+
+    private String describePayment(SchafkopfGame game, PaymentAmounts amounts) {
+        if (amounts.durchmarsch()) {
+            return String.format("Durchmarsch: Solo-Tarif %d ct x %d = %d ct pro Spieler",
+                    amounts.baseCents(), game.bettingState().multiplier(), amounts.totalCentsPerPlayer());
+        }
+        if (amounts.jungfrauCount() > 0) {
+            return String.format("%s: %d Jungfrau(en), Tarif x %d = %d ct pro Spieler",
+                    game.gameContract().displayName(), amounts.jungfrauCount(),
+                    game.bettingState().multiplier() * amounts.jungfrauMultiplier(),
+                    amounts.totalCentsPerPlayer());
+        }
+        return String.format("%s: %d ct%s%s%s x %d = %d ct pro Spieler",
+                game.gameContract().displayName(), amounts.baseCents(),
+                amounts.schneiderCents() > 0 ? " + Schneider (" + amounts.schneiderCents() + " ct)" : "",
+                amounts.schwarzCents() > 0 ? " + Schwarz (" + amounts.schwarzCents() + " ct)" : "",
+                amounts.laufendeCents() > 0
+                        ? " + " + amounts.laufendeCount() + " Laufende (" + amounts.laufendeCents() + " ct)" : "",
+                game.bettingState().multiplier(), amounts.totalCentsPerPlayer());
     }
 
     /**
@@ -168,7 +196,7 @@ public class Tariff {
     }
 
     private int minimumLaufende(GameType gameType) {
-        return gameType == GameType.WENZ || gameType == GameType.GEIER || gameType == GameType.FARBWENZ
+        return gameType == GameType.WENZ || gameType == GameType.GEIER
             ? 2 : 3;
     }
 

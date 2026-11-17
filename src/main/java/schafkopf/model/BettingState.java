@@ -1,6 +1,8 @@
 package schafkopf.model;
 
-import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -20,13 +22,33 @@ import java.util.Set;
  */
 public class BettingState {
 
+    public record StakeBreakdown(
+            List<String> klopferIds,
+            int additionalKlopfer,
+            int stockDoubles,
+            int stockFactor,
+            boolean kontra,
+            boolean retour,
+            int totalMultiplier
+    ) {
+        public StakeBreakdown {
+            klopferIds = List.copyOf(klopferIds);
+        }
+
+        public int klopferCount() {
+            return klopferIds.size() + additionalKlopfer;
+        }
+    }
+
     private int multiplier = 1;
+    private int stockFactor = 1;
     private boolean doublingAllowed = true;
+    private int additionalKlopfer;
 
     // tracks kontra/retour steps so we can cap or display them
     private int kontraCount = 0;
     private int retourCount = 0;
-    private final Set<String> playersWhoDoubled = new HashSet<>();
+    private final Set<String> playersWhoDoubled = new LinkedHashSet<>();
 
     /**
      * Applies a pre-deal doubling (Klopfen / Eindoppeln).
@@ -34,6 +56,7 @@ public class BettingState {
      */
     public void applyDouble() {
         multiplier = Math.multiplyExact(multiplier, 2);
+        additionalKlopfer++;
         doublingAllowed = false;
     }
 
@@ -50,10 +73,14 @@ public class BettingState {
     }
 
     public void applyStock(int stockMultiplier) {
-        if (stockMultiplier < 2) {
-            throw new IllegalArgumentException("stockMultiplier must be at least 2");
+        if (stockMultiplier < 2 || stockMultiplier > 32 || Integer.bitCount(stockMultiplier) != 1) {
+            throw new IllegalArgumentException("stockMultiplier must be a power of two from 2 through 32");
+        }
+        if (stockFactor > 32 / stockMultiplier) {
+            throw new IllegalArgumentException("Stock factor cannot exceed 32");
         }
         multiplier = Math.multiplyExact(multiplier, stockMultiplier);
+        stockFactor = Math.multiplyExact(stockFactor, stockMultiplier);
     }
 
     /**
@@ -68,6 +95,30 @@ public class BettingState {
      */
     public int multiplier() {
         return multiplier;
+    }
+
+    public int stockFactor() {
+        return stockFactor;
+    }
+
+    public int stockDoubles() {
+        return Integer.numberOfTrailingZeros(stockFactor);
+    }
+
+    public void restoreLegacyMultiplier(int legacyMultiplier) {
+        if (legacyMultiplier < 1) {
+            throw new IllegalArgumentException("legacyMultiplier must be positive");
+        }
+        multiplier = legacyMultiplier;
+        if (Integer.bitCount(legacyMultiplier) == 1) {
+            additionalKlopfer = Integer.numberOfTrailingZeros(legacyMultiplier);
+            doublingAllowed = legacyMultiplier == 1;
+        }
+    }
+
+    public StakeBreakdown breakdown() {
+        return new StakeBreakdown(new ArrayList<>(playersWhoDoubled), additionalKlopfer,
+                stockDoubles(), stockFactor, kontraCount > 0, retourCount > 0, multiplier);
     }
 
     /**
@@ -119,7 +170,9 @@ public class BettingState {
     /** Resets all state for a new game. */
     public void reset() {
         multiplier = 1;
+        stockFactor = 1;
         doublingAllowed = true;
+        additionalKlopfer = 0;
         kontraCount = 0;
         retourCount = 0;
         playersWhoDoubled.clear();

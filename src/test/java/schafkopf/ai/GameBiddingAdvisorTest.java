@@ -3,7 +3,6 @@ package schafkopf.ai;
 import org.junit.jupiter.api.Test;
 import schafkopf.ai.policy.PolicyGenome;
 import schafkopf.ai.policy.ContractValueModel;
-import schafkopf.ai.policy.ContractValueModel;
 import schafkopf.model.GameType;
 import schafkopf.model.Personality;
 import schafkopf.model.Player;

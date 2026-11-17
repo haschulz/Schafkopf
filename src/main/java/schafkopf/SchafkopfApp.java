@@ -25,9 +25,18 @@ import schafkopf.state.SchafkopfGame;
 import schafkopf.training.InteractiveTrainingGame;
 
 import java.util.List;
+import java.util.Locale;
 import java.nio.file.Path;
 
+@SuppressWarnings("java:S106")
 public class SchafkopfApp {
+    private static final String CONFIG_DIRECTORY = "config";
+    private static final String GENOMES_DIRECTORY = "genomes";
+    private static final String PROPERTIES_EXTENSION = ".properties";
+    private static final String FARBWENZ_RECOMMENDATION = "card.FARBWENZ.recommendation";
+    private static final String FARBWENZ_POINTS = "card.FARBWENZ.points";
+    private static final String FARBWENZ_TRUMP_STRENGTH = "card.FARBWENZ.farbwenzTrumpStrength";
+
     /** Usage: nachkarteln-datei FILE PLAYER_NAME [samples] */
     private static void runRecordedGameReview(String[] args) {
         if (args.length < 3) {
@@ -37,17 +46,19 @@ public class SchafkopfApp {
         try {
             String text = new String(java.nio.file.Files.readAllBytes(Path.of(args[1])),
                     java.nio.charset.StandardCharsets.UTF_8);
-            GameRecord record = schafkopf.analysis.GameRecordParser.parse(text);
-            int seat = record.playerNames().stream().map(String::toLowerCase).toList().indexOf(args[2].toLowerCase());
+            GameRecord gameRecord = schafkopf.analysis.GameRecordParser.parse(text);
+            int seat = gameRecord.playerNames().stream().map(String::toLowerCase).toList()
+                    .indexOf(args[2].toLowerCase());
             if (seat < 0) {
-                System.out.println("Spieler '" + args[2] + "' kommt in der Partie nicht vor: " + record.playerNames());
+                System.out.println("Spieler '" + args[2] + "' kommt in der Partie nicht vor: "
+                        + gameRecord.playerNames());
                 return;
             }
             int samples = args.length > 3 ? Integer.parseInt(args[3]) : 100;
             RuleEngine rules = new RuleEngine();
             SimpleBot bot = new SimpleBot(rules, true, PolicyGenome.loadConfigured());
             PostGameAnalyzer analyzer = new PostGameAnalyzer(rules, bot, samples);
-            System.out.println(PostGameAnalyzer.report(analyzer.review(record, seat, 1L)));
+            System.out.println(PostGameAnalyzer.report(analyzer.review(gameRecord, seat, 1L)));
         } catch (java.io.IOException | IllegalArgumentException invalid) {
             System.out.println("Partie konnte nicht gelesen werden: " + invalid.getMessage());
         }
@@ -68,74 +79,59 @@ public class SchafkopfApp {
         game.autoDetermineRufspiel();
         game.playFullGame(players.get(0));
 
-        GameRecord record = GameRecord.from(game);
+        GameRecord gameRecord = GameRecord.from(game);
         System.out.println(game.gameContract().displayName() + ", angesagt von "
                 + game.gameContract().caller().name());
-        for (int index = 0; index < record.plays().size(); index += 4) {
-            System.out.println("Stich " + (index / 4 + 1) + ": " + record.plays().subList(index, index + 4).stream()
-                    .map(play -> record.playerNames().get(play.seat()) + " " + play.card().shortName())
+        for (int index = 0; index < gameRecord.plays().size(); index += 4) {
+            System.out.println("Stich " + (index / 4 + 1) + ": "
+                + gameRecord.plays().subList(index, index + 4).stream()
+                .map(play -> gameRecord.playerNames().get(play.seat()) + " " + play.card().shortName())
                     .toList());
         }
         System.out.println();
         PostGameAnalyzer analyzer = new PostGameAnalyzer(rules, bot, samples);
-        System.out.println(PostGameAnalyzer.report(analyzer.review(record, seat, dealSeed)));
+        System.out.println(PostGameAnalyzer.report(analyzer.review(gameRecord, seat, dealSeed)));
     }
 
     public static void main(String[] args) {
         SchafkopfConfig config = SchafkopfConfig.load();
-        if (args.length > 0 && args[0].equalsIgnoreCase("nachkarteln")) {
-            runPostGameReview(args, config);
-            return;
+        if (!runCommand(args, config)) {
+            runDefaultSimulation(args, config);
         }
-        if (args.length > 0 && args[0].equalsIgnoreCase("nachkarteln-datei")) {
-            runRecordedGameReview(args);
-            return;
-        }
-        if (args.length > 0 && args[0].equalsIgnoreCase("evolve")) {
-            runEvolution(args, config);
-            return;
-        }
-        if (args.length > 0 && args[0].equalsIgnoreCase("validate")) {
-            runHoldoutValidation(args, config);
-            return;
-        }
-        if (args.length > 0 && args[0].equalsIgnoreCase("calibrate")) {
-            runContractCalibration(args, config);
-            return;
-        }
-        if (args.length > 0 && args[0].equalsIgnoreCase("validate-farbwenz")) {
-            runFarbWenzValidation(args, config);
-            return;
-        }
-        if (args.length > 0 && args[0].equalsIgnoreCase("evolve-farbwenz")) {
-            runFarbWenzEvolution(args, config);
-            return;
-        }
-        if (args.length > 0 && args[0].equalsIgnoreCase("evolve-matrix")) {
-            runMatrixEvolution(args, config);
-            return;
-        }
-        if (args.length > 0 && args[0].equalsIgnoreCase("validate-matrix")) {
-            runMatrixValidation(args, config);
-            return;
-        }
-        if (args.length > 0 && args[0].equalsIgnoreCase("compose-matrix")) {
-            runMatrixComposition(args, config);
-            return;
-        }
-        // Interaktiver Trainingsmodus ("./run.sh play")
-        if (args.length > 0 && args[0].equalsIgnoreCase("play")) {
-            ScoreLedger ledger = new ScoreLedger(List.of(
-                    new Player("1", "Spieler 1 (Sepp)"),
-                    new Player("2", "Spieler 2 (Hans)"),
-                    new Player("3", "Spieler 3 (Franz)"),
-                    new Player("4", "Spieler 4 (Du)")
-            ), new Tariff(config));
-            InteractiveTrainingGame training = new InteractiveTrainingGame(System.in, config);
-            training.startInteractiveSession(ledger);
-            return;
-        }
+    }
 
+    private static boolean runCommand(String[] args, SchafkopfConfig config) {
+        if (args.length == 0) {
+            return false;
+        }
+        return switch (args[0].toLowerCase(Locale.ROOT)) {
+            case "nachkarteln" -> { runPostGameReview(args, config); yield true; }
+            case "nachkarteln-datei" -> { runRecordedGameReview(args); yield true; }
+            case "evolve" -> { runEvolution(args, config); yield true; }
+            case "validate" -> { runHoldoutValidation(args, config); yield true; }
+            case "calibrate" -> { runContractCalibration(args, config); yield true; }
+            case "validate-farbwenz" -> { runFarbWenzValidation(args, config); yield true; }
+            case "evolve-farbwenz" -> { runFarbWenzEvolution(args, config); yield true; }
+            case "evolve-matrix" -> { runMatrixEvolution(args, config); yield true; }
+            case "validate-matrix" -> { runMatrixValidation(args, config); yield true; }
+            case "compose-matrix" -> { runMatrixComposition(args, config); yield true; }
+            case "play" -> { runInteractiveTraining(config); yield true; }
+            default -> false;
+        };
+    }
+
+    private static void runInteractiveTraining(SchafkopfConfig config) {
+        ScoreLedger ledger = new ScoreLedger(List.of(
+                new Player("1", "Spieler 1 (Sepp)"),
+                new Player("2", "Spieler 2 (Hans)"),
+                new Player("3", "Spieler 3 (Franz)"),
+                new Player("4", "Spieler 4 (Du)")
+        ), new Tariff(config));
+        InteractiveTrainingGame training = new InteractiveTrainingGame(System.in, config);
+        training.startInteractiveSession(ledger);
+    }
+
+    private static void runDefaultSimulation(String[] args, SchafkopfConfig config) {
         System.out.println("==========================================================================");
         System.out.println("                 SCHAFKOPF MULTI-AGENTEN & TAKTIK-SIMULATOR               ");
         System.out.println("==========================================================================\n");
@@ -233,12 +229,13 @@ public class SchafkopfApp {
         List<PolicyGenome> initialPopulation = seedGenomes.subList(0, Math.min(populationSize, seedGenomes.size()));
 
         GeneticAlgorithm.EvolutionResult result;
-        Path tracePath = Path.of("config", "traces", "evolution-" + seed + ".jsonl");
+        Path tracePath = Path.of(CONFIG_DIRECTORY, "traces", "evolution-" + seed + ".jsonl");
         try (DecisionTraceWriter traceWriter = new DecisionTraceWriter(tracePath)) {
             PolicyTournament tournament = new PolicyTournament(config, traceWriter);
             result = tournament.evolve(initialPopulation, generations, populationSize, 1, 0.2, gamesPerSeat, seed);
         }
-        Path championPath = Path.of("config", "genomes", "champion-" + seed + ".properties");
+        Path championPath = Path.of(CONFIG_DIRECTORY, GENOMES_DIRECTORY,
+            "champion-" + seed + PROPERTIES_EXTENSION);
         result.champion().save(championPath);
 
         System.out.printf("Evolution abgeschlossen: %d Bewertungen, Champion %s, risikoadjustierte Fitness %.2f ct/Spiel%n",
@@ -313,14 +310,14 @@ public class SchafkopfApp {
         ContractValueCalibrator.CalibrationResult result = new ContractValueCalibrator(config)
             .calibrate(deals, seed, ridge);
         Path modelPath = args.length > 4 ? Path.of(args[4])
-            : Path.of("config", "contract-value-model.properties");
+            : Path.of(CONFIG_DIRECTORY, "contract-value-model" + PROPERTIES_EXTENSION);
         result.model().save(modelPath);
         System.out.printf("Kalibrierung abgeschlossen: %d Rollouts aus %d Deals gegen %d Policies, Seed %d%n",
             result.rollouts(), result.dealsSampled(), result.opponentPolicyCount(), result.seed());
         result.samplesByGameType().forEach((gameType, count) ->
             System.out.printf("  %-10s %d Samples%n", gameType, count));
         System.out.println("Expected-Value-Modell gespeichert: " + modelPath);
-        if (modelPath.equals(Path.of("config", "contract-value-model.properties"))) {
+        if (modelPath.equals(Path.of(CONFIG_DIRECTORY, "contract-value-model" + PROPERTIES_EXTENSION))) {
             System.out.println("Es wird bei der nächsten Ansage automatisch geladen.");
         } else {
             System.out.println("Separates Modell; zum Laden -Dschafkopf.valueModel=" + modelPath + " setzen.");
@@ -368,7 +365,8 @@ public class SchafkopfApp {
         }
 
         PolicyGenome baseline = PolicyGenome.loadConfigured();
-        Path previousChampionPath = Path.of("config", "genomes", "champion-60000.properties");
+        Path previousChampionPath = Path.of(CONFIG_DIRECTORY, GENOMES_DIRECTORY,
+            "champion-60000" + PROPERTIES_EXTENSION);
         PolicyGenome previousChampion = java.nio.file.Files.exists(previousChampionPath)
             ? PolicyGenome.load(previousChampionPath)
             : baseline.withId("previous-default");
@@ -376,21 +374,22 @@ public class SchafkopfApp {
             baseline.withId("farbwenz-baseline"),
             previousChampion.withId("previous-generalist"),
             baseline.withId("draw-strong-trumps")
-                .withWeight("card.FARBWENZ.recommendation", 0.2)
+                .withWeight(FARBWENZ_RECOMMENDATION, 0.2)
                 .withWeight("card.FARBWENZ.farbwenzSoloistLeadTrump", 2.0)
-                .withWeight("card.FARBWENZ.farbwenzTrumpStrength", 1.8),
+                .withWeight(FARBWENZ_TRUMP_STRENGTH, 1.8),
             baseline.withId("save-high-trumps")
-                .withWeight("card.FARBWENZ.recommendation", 0.2)
-                .withWeight("card.FARBWENZ.points", -0.8)
-                .withWeight("card.FARBWENZ.farbwenzTrumpStrength", 0.4),
+                .withWeight(FARBWENZ_RECOMMENDATION, 0.2)
+                .withWeight(FARBWENZ_POINTS, -0.8)
+                .withWeight(FARBWENZ_TRUMP_STRENGTH, 0.4),
             baseline.withId("take-certain-tricks")
-                .withWeight("card.FARBWENZ.recommendation", 0.2)
+                .withWeight(FARBWENZ_RECOMMENDATION, 0.2)
                 .withWeight("card.FARBWENZ.farbwenzWinningTrick", 4.0)
-                .withWeight("card.FARBWENZ.points", -0.2));
+                .withWeight(FARBWENZ_POINTS, -0.2));
         List<PolicyGenome> initial = seedGenomes.subList(0, Math.min(populationSize, seedGenomes.size()));
         var result = new FarbWenzSoloistOptimizer(config).evolve(
             initial, generations, populationSize, 1, 0.25, dealsPerEvaluation, seed);
-        Path championPath = Path.of("config", "genomes", "farbwenz-champion-" + seed + ".properties");
+        Path championPath = Path.of(CONFIG_DIRECTORY, GENOMES_DIRECTORY,
+            "farbwenz-champion-" + seed + PROPERTIES_EXTENSION);
         result.champion().save(championPath);
         System.out.printf("Fixvertrag-Evolution: %d Deals/Policy, %d Bewertungen, Champion %s, Fitness %.2f ct/Spiel%n",
             dealsPerEvaluation, result.evaluationCount(), result.champion().id(), result.championFitness());
@@ -413,7 +412,7 @@ public class SchafkopfApp {
         PolicyGenome baseline = PolicyGenome.loadConfigured();
         PolicyGenome lowRecommendation = baseline.withId("matrix-low-recommendation")
             .withWeight("card.FARBSOLO.recommendation", 0.1)
-            .withWeight("card.FARBWENZ.recommendation", 0.1)
+            .withWeight(FARBWENZ_RECOMMENDATION, 0.1)
             .withWeight("card.RUFSPIEL.recommendation", 0.1)
             .withWeight("card.WENZ.recommendation", 0.1)
             .withWeight("card.BETTEL.recommendation", 0.1);
@@ -422,7 +421,7 @@ public class SchafkopfApp {
             .withWeight("card.winningTrick", 6.0)
             .withWeight("card.teammatePoints", 0.8)
             .withWeight("card.FARBSOLO.points", -0.8)
-            .withWeight("card.FARBWENZ.points", -0.8)
+            .withWeight(FARBWENZ_POINTS, -0.8)
             .withWeight("card.RUFSPIEL.points", -0.8)
             .withWeight("card.WENZ.points", -0.8)
             .withWeight("card.BETTEL.points", -0.8);
@@ -434,7 +433,7 @@ public class SchafkopfApp {
             baseline.withId("matrix-baseline"),
             baseline.withId("matrix-avoid-points")
                 .withWeight("card.points", -0.5)
-                .withWeight("card.FARBWENZ.points", -0.5),
+                .withWeight(FARBWENZ_POINTS, -0.5),
             lowRecommendation,
             pointsAndTricks,
             alternativeFarbs,
@@ -442,12 +441,13 @@ public class SchafkopfApp {
                 .withWeight("card.winningTrick", 5.5)
                 .withWeight("card.FARBWENZ.farbwenzWinningTrick", 2.5),
             baseline.withId("matrix-trump-control")
-                .withWeight("card.FARBWENZ.farbwenzTrumpStrength", 1.6)
+                .withWeight(FARBWENZ_TRUMP_STRENGTH, 1.6)
                 .withWeight("card.FARBWENZ.farbwenzSoloistLeadTrump", 1.4));
         var result = new ContractMatrixOptimizer(config).evolve(
             initialPopulation.subList(0, Math.min(populationSize, initialPopulation.size())),
             generations, populationSize, 1, 0.75, dealsPerEvaluation, seed);
-        Path championPath = Path.of("config", "genomes", "matrix-champion-" + seed + ".properties");
+        Path championPath = Path.of(CONFIG_DIRECTORY, GENOMES_DIRECTORY,
+            "matrix-champion-" + seed + PROPERTIES_EXTENSION);
         result.champion().save(championPath);
         System.out.printf("Vertragsmatrix-Evolution: %d Deals/Policy/Generation, %d Bewertungen, Champion %s, Fitness %.2f ct/Spiel%n",
             dealsPerEvaluation, result.evaluationCount(), result.champion().id(), result.championFitness());

@@ -39,8 +39,8 @@ public record SchafkopfConfig(
         if (baseTariffCents <= 0 || rufspielTariffCents <= 0 || soloTariffCents <= 0) {
             throw new IllegalArgumentException("Tariff amounts must be positive");
         }
-        if (stockMultiplier < 2) {
-            throw new IllegalArgumentException("stockMultiplier must be at least 2");
+        if (stockMultiplier != 2) {
+            throw new IllegalArgumentException("stockMultiplier must be 2");
         }
         if (mussGameType == GameType.RUFSPIEL
             || mussGameType == GameType.RAMSCH || mussGameType == GameType.KREUZBOCK

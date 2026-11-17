@@ -7,6 +7,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+@SuppressWarnings("java:S106")
 public class ScoreLedger {
     private final Tariff tariff;
     private final Map<String, Integer> balancesCents = new HashMap<>();
@@ -76,11 +77,15 @@ public class ScoreLedger {
         }
     }
 
-    public void addStock(int multiplier) {
-        if (multiplier < 2) {
-            throw new IllegalArgumentException("Stock multiplier must be at least 2");
+    public boolean addStock(int multiplier) {
+        if (multiplier < 2 || multiplier > 32 || Integer.bitCount(multiplier) != 1) {
+            throw new IllegalArgumentException("Stock multiplier must be a power of two from 2 through 32");
+        }
+        if (pendingStockMultiplier > 32 / multiplier) {
+            return false;
         }
         pendingStockMultiplier = Math.multiplyExact(pendingStockMultiplier, multiplier);
+        return true;
     }
 
     public int consumeStockMultiplier() {
@@ -97,7 +102,7 @@ public class ScoreLedger {
         System.out.println("==========================================================================");
         System.out.println("                    SCHAFKOPF-STAMMTISCH: GESAMTABRECHNUNG                ");
         System.out.println("==========================================================================");
-        System.out.printf("%-26s | %-6s | %-12s | %-16s | %-12s\n",
+        System.out.printf("%-26s | %-6s | %-12s | %-16s | %-12s%n",
                 "Spieler", "Spiele", "Siege (Quote)", "Rollen (R / M / G)", "Kontostand");
         System.out.println("---------------------------+--------+---------------+------------------+-------------");
 
@@ -112,10 +117,10 @@ public class ScoreLedger {
             int balance = balancesCents.getOrDefault(id, 0);
 
             String balanceStr = String.format("%+d ct (%+.2f €)", balance, balance / 100.0);
-            System.out.printf("%-26s | %6d | %4d (%5.1f%%) | %4d / %2d / %2d  | %12s\n",
+            System.out.printf("%-26s | %6d | %4d (%5.1f%%) | %4d / %2d / %2d  | %12s%n",
                     p.name(), played, won, quote, r, m, g, balanceStr);
         }
-        System.out.println("==========================================================================\n");
+        System.out.printf("==========================================================================%n%n");
     }
 
     public int getBalance(Player player) {

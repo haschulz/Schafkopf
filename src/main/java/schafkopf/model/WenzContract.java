@@ -71,13 +71,8 @@ public class WenzContract implements GameContract {
      */
     @Override
     public boolean isTrump(Card card, schafkopf.rules.RuleEngine rules) {
-        if (card.rank() == Rank.UNTER) {
-            return true; // All 4 Unter are always trump in Wenz/Farbwenz
-        }
-        if (trumpSuit != null && card.suit() == trumpSuit && card.rank() != Rank.UNTER) {
-            return true; // Farbwenz: trump suit cards (Unter already handled above)
-        }
-        return false;
+        return card.rank() == Rank.UNTER
+                || trumpSuit != null && card.suit() == trumpSuit && card.rank() != Rank.UNTER;
     }
 
     /**
@@ -145,9 +140,9 @@ public class WenzContract implements GameContract {
     @Override
     public String displayName() {
         if (type == GameType.FARBWENZ) {
-            return "Farbwenz auf " + trumpSuit.displayName() + " (gerufen von " + caller.name() + ")";
+            return "Farbwenz auf " + trumpSuit.displayName() + " (gespielt von " + caller.name() + ")";
         }
-        return "Wenz" + (tout ? " Tout" : "") + " (gerufen von " + caller.name() + ")";
+        return "Wenz" + (tout ? " Tout" : "") + " (gespielt von " + caller.name() + ")";
     }
 
     @Override

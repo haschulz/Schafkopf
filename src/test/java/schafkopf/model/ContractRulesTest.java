@@ -166,10 +166,94 @@ class ContractRulesTest {
     }
 
     @Test
+    void soloDisplayNamesTheCallerAsThePlayerNotAsSomeoneWhoWasCalled() {
+        Player soloist = new Player("3", "Franz");
+
+        assertEquals("Farbsolo auf Gras (gespielt von Franz)",
+                new SoloContract(soloist, Suit.GRAS).displayName());
+        assertEquals("Wenz (gespielt von Franz)", new WenzContract(soloist).displayName());
+        assertEquals("Farbwenz auf Gras (gespielt von Franz)",
+            new WenzContract(soloist, Suit.GRAS).displayName());
+        assertEquals("Geier (gespielt von Franz)", new GeierContract(soloist).displayName());
+        assertEquals("Bettel (gespielt von Franz)", new BettelContract(soloist).displayName());
+    }
+
+    @Test
     void toutRequiresAllEightTricksAndPaysExistingSchwarzBonus() {
         Player caller = new Player("1", "Sepp");
         assertToutResult(new SoloContract(caller, Suit.EICHEL, true), true);
         assertToutResult(new WenzContract(caller, true), false);
+    }
+
+    @Test
+    void laufendeMinimumDependsOnContractTrumpRank() {
+        Player caller = new Player("1", "P1");
+        List<Card> unters = List.of(
+                new Card(Suit.EICHEL, Rank.UNTER), new Card(Suit.GRAS, Rank.UNTER),
+                new Card(Suit.HERZ, Rank.UNTER), new Card(Suit.SCHELLEN, Rank.UNTER));
+        List<Card> obers = List.of(
+                new Card(Suit.EICHEL, Rank.OBER), new Card(Suit.GRAS, Rank.OBER),
+                new Card(Suit.HERZ, Rank.OBER), new Card(Suit.SCHELLEN, Rank.OBER));
+
+        assertEquals(0, paymentForLaufende(new WenzContract(caller, Suit.EICHEL), unters, 2).laufendeCents());
+        assertEquals(30, paymentForLaufende(new WenzContract(caller, Suit.EICHEL), unters, 3).laufendeCents());
+        assertEquals(20, paymentForLaufende(new WenzContract(caller), unters, 2).laufendeCents());
+        assertEquals(0, paymentForLaufende(new SoloContract(caller, Suit.EICHEL), obers, 2).laufendeCents());
+        assertEquals(30, paymentForLaufende(new SoloContract(caller, Suit.EICHEL), obers, 3).laufendeCents());
+    }
+
+    @Test
+    void toutDoublesLaufendeButDoesNotChargeSchneiderOrSchwarz() {
+        Player caller = new Player("1", "P1");
+        List<Player> players = List.of(caller, new Player("2", "P2"),
+                new Player("3", "P3"), new Player("4", "P4"));
+        SchafkopfGame game = new SchafkopfGame(players, rules, new SimpleBot(rules));
+        game.setLogger(ignored -> { });
+        game.setupContract(new SoloContract(caller, Suit.EICHEL, true));
+        List<Card> topTrumps = List.of(
+                new Card(Suit.EICHEL, Rank.OBER), new Card(Suit.GRAS, Rank.OBER),
+                new Card(Suit.HERZ, Rank.OBER), new Card(Suit.SCHELLEN, Rank.OBER));
+        for (int index = 0; index < 8; index++) {
+            Player winner = index < 4 ? caller : players.get(1);
+            Card card = index < 4 ? topTrumps.get(index) : new Card(Suit.EICHEL, Rank.SIEBEN);
+            Trick trick = new Trick(index + 1, winner);
+            trick.addCard(winner, card);
+            trick.setWinningPlayedCard(new schafkopf.model.PlayedCard(winner, card));
+            winner.addWonTrick(trick);
+            game.completedTricks().add(trick);
+        }
+        game.finishGame();
+
+        Tariff.PaymentBreakdown payment = new Tariff(SchafkopfConfig.defaults()).calculatePayment(game);
+
+        assertEquals(100, payment.baseCents());
+        assertEquals(80, payment.laufendeCents());
+        assertEquals(0, payment.schneiderCents());
+        assertEquals(0, payment.schwarzCents());
+        assertEquals(180, payment.totalCentsPerPlayer());
+    }
+
+    private Tariff.PaymentBreakdown paymentForLaufende(
+            GameContract contract, List<Card> topTrumps, int callerHolds
+    ) {
+        Player caller = contract.caller();
+        Player defender = new Player("2", "P2");
+        List<Player> players = List.of(caller, defender, new Player("3", "P3"), new Player("4", "P4"));
+        if (contract instanceof RufspielContract rufspiel) {
+            defender.setHand(List.of(rufspiel.calledSau()));
+        }
+        SchafkopfGame game = new SchafkopfGame(players, rules, new SimpleBot(rules));
+        game.setLogger(ignored -> { });
+        game.setupContract(contract);
+        for (int index = 0; index < topTrumps.size(); index++) {
+            Player holder = index < callerHolds ? caller : defender;
+            Trick trick = new Trick(index + 1, holder);
+            trick.addCard(holder, topTrumps.get(index));
+            holder.addWonTrick(trick);
+            game.completedTricks().add(trick);
+        }
+        game.finishGame();
+        return new Tariff(SchafkopfConfig.defaults()).calculatePayment(game);
     }
 
     private void assertToutResult(GameContract contract, boolean callerWins) {
@@ -184,10 +268,11 @@ class ContractRulesTest {
                 ? new SoloContract(players.get(0), ((SoloContract) contract).trumpSuit(), true)
                 : new WenzContract(players.get(0), true));
         for (int trickNumber = 1; trickNumber <= 8; trickNumber++) {
-            Player winner = callerWins || trickNumber < 8 ? players.get(0) : players.get(1);
             Trick trick = new Trick(trickNumber, players.get(0));
             trick.setWinningPlayedCard(new schafkopf.model.PlayedCard(
-                    winner, new Card(Suit.EICHEL, Rank.OBER)));
+                    players.get(callerWins || trickNumber < 8 ? 0 : 1),
+                new Card(Suit.EICHEL, Rank.OBER)));
+            Player winner = trick.winningPlayedCard().player();
             winner.addWonTrick(trick);
             game.completedTricks().add(trick);
         }
@@ -198,8 +283,9 @@ class ContractRulesTest {
         assertEquals(callerWins, result.callerTeamWon());
         assertEquals(callerWins, result.isSchwarz());
         assertFalse(result.isSchneider());
-        assertEquals(callerWins ? 10 : 0, payment.schwarzCents());
-        assertEquals(50 + (callerWins ? 10 : 0), payment.totalCentsPerPlayer());
+        assertEquals(0, payment.schneiderCents());
+        assertEquals(0, payment.schwarzCents());
+        assertEquals(100, payment.totalCentsPerPlayer());
     }
 
     @Test
