@@ -190,12 +190,6 @@ public final class GameBiddingAdvisor {
             chosenSuitTrumpPoints = suitTrumps.stream().mapToInt(Card::points).sum();
         }
         for (Suit suit : Suit.values()) {
-            boolean hasNonTrumpCards = List.of(Rank.SAU, Rank.ZEHN, Rank.KOENIG, Rank.NEUN, Rank.ACHT, Rank.SIEBEN)
-                    .stream()
-                    .anyMatch(rank -> !contract.isTrump(new Card(suit, rank), rules));
-            if (!hasNonTrumpCards) {
-                continue;
-            }
             List<Card> sideCards = player.hand().stream()
                 .filter(card -> !contract.isTrump(card, rules) && card.suit() == suit)
                 .toList();

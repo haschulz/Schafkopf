@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -30,8 +29,6 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -56,7 +53,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -74,15 +70,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.StringReader
-import java.io.StringWriter
 import schafkopf.ai.SimpleBot
 import schafkopf.ai.policy.PolicyGenome
 import schafkopf.analysis.GameRecord
-import schafkopf.analysis.LearningJournalCodec
-import schafkopf.analysis.LearningJournalEntry
 import schafkopf.analysis.PostGameAnalyzer
-import schafkopf.config.SchafkopfConfig
 import schafkopf.model.BettelContract
 import schafkopf.model.Card as GameCard
 import schafkopf.model.Deck
@@ -98,14 +89,11 @@ import schafkopf.model.WenzContract
 import schafkopf.rules.RuleEngine
 import schafkopf.state.GameSession
 import java.util.Random
-import java.util.Properties
-import java.util.UUID
-import kotlin.math.abs
 
 private val Gold = Color(0xFFE2B54A)
 private val OpponentBlue = Color(0xE05A55C9)
 private val HumanRed = Color(0xE0B3261E)
-private const val REVIEW_SAMPLES = 60
+private const val REVIEW_SAMPLES = 40
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -127,32 +115,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-internal data class PendingDealState(
-    val stage: String,
-    val vorhandSeat: Int,
-    val deckCards: List<GameCard>,
-    val hands: List<List<GameCard>>?
-)
-
-private fun encodeCards(cards: List<GameCard>): String =
-    cards.joinToString(",") { "${it.suit().name}:${it.rank().name}" }
-
-private fun decodeCards(encoded: String): List<GameCard> = if (encoded.isBlank()) {
-    emptyList()
-} else {
-    encoded.split(",").map { code ->
-        val parts = code.split(":")
-        GameCard(Suit.valueOf(parts[0]), schafkopf.model.Rank.valueOf(parts[1]))
-    }
-}
-
 internal class ScoreStore(private val prefs: SharedPreferences) {
-    private companion object {
-        const val LEARNING_JOURNAL_IDS = "learningJournal.ids"
-        const val LEARNING_JOURNAL_ENTRY_PREFIX = "learningJournal.entry."
-        const val MAX_LEARNING_JOURNAL_ENTRIES = 20
-    }
-
     fun scores(): List<Int> = (0..3).map { prefs.getInt("score$it", 0) }
 
     /** Adds the points once per game; scores and the settled marker are written in one commit. */
@@ -160,20 +123,12 @@ internal class ScoreStore(private val prefs: SharedPreferences) {
         if (prefs.getLong("settledGame", 0L) == gameId) return
         val editor = prefs.edit()
         points.forEachIndexed { seat, value -> editor.putInt("score$seat", prefs.getInt("score$seat", 0) + value) }
-        editor.putInt("games", prefs.getInt("games", 0) + 1).putLong("settledGame", gameId)
-            .putInt("pendingStockDoubles", 0).remove("pendingDeal").commit()
-    }
-
-    fun pendingStockDoubles(): Int = prefs.getInt("pendingStockDoubles", 0).coerceIn(0, 5)
-
-    fun savePendingStockDoubles(doubles: Int) {
-        require(doubles in 0..5)
-        prefs.edit().putInt("pendingStockDoubles", doubles).commit()
+        editor.putInt("games", prefs.getInt("games", 0) + 1).putLong("settledGame", gameId).commit()
     }
 
     // commit() instead of apply(): the app may be killed right after any move.
     fun saveSession(gameId: Long, state: String) {
-        prefs.edit().putLong("gameId", gameId).putString("session", state).remove("pendingDeal").commit()
+        prefs.edit().putLong("gameId", gameId).putString("session", state).commit()
     }
 
     fun savedSession(): Pair<Long, String>? {
@@ -185,95 +140,22 @@ internal class ScoreStore(private val prefs: SharedPreferences) {
         prefs.edit().remove("session").remove("gameId").commit()
     }
 
-    fun savePendingDeal(vorhandSeat: Int, stage: String, deck: Deck, hands: List<List<GameCard>>?) {
-        val state = Properties().apply {
-            setProperty("version", "1")
-            setProperty("stage", stage)
-            setProperty("vorhand", vorhandSeat.toString())
-            setProperty("deck", encodeCards(deck.cards()))
-            hands?.forEachIndexed { index, hand -> setProperty("hand$index", encodeCards(hand)) }
-        }
-        val writer = StringWriter()
-        state.store(writer, null)
-        prefs.edit().putString("pendingDeal", writer.toString()).commit()
-    }
-
-    fun pendingDeal(): PendingDealState? {
-        val saved = prefs.getString("pendingDeal", null) ?: return null
-        return runCatching {
-            val state = Properties().apply { load(StringReader(saved)) }
-            require(state.getProperty("version") == "1")
-            val stage = state.getProperty("stage")
-            require(stage == "CUT" || stage == "KLOPFEN")
-            val hands = if (stage == "KLOPFEN") (0..3).map { index ->
-                decodeCards(state.getProperty("hand$index", ""))
-            } else null
-            val vorhandSeat = state.getProperty("vorhand").toInt()
-            val deckCards = decodeCards(state.getProperty("deck", ""))
-            require(vorhandSeat in 0..3)
-            Deck(deckCards)
-            require(hands == null || hands.size == 4 && hands.all { it.size == 8 }
-                    && hands.flatten().distinct().size == 32)
-            PendingDealState(stage, vorhandSeat, deckCards, hands)
-        }.getOrElse {
-            clearPendingDeal()
-            null
-        }
-    }
-
-    fun clearPendingDeal() {
-        prefs.edit().remove("pendingDeal").commit()
-    }
-
     fun reset() {
         val editor = prefs.edit()
         (0..3).forEach { editor.remove("score$it") }
         editor.remove("games").commit()
     }
-
-    fun learningEntries(): List<LearningJournalEntry> =
-        prefs.getStringSet(LEARNING_JOURNAL_IDS, emptySet()).orEmpty()
-            .mapNotNull { id ->
-                prefs.getString(LEARNING_JOURNAL_ENTRY_PREFIX + id, null)
-                    ?.let { encoded -> runCatching { LearningJournalCodec.decode(encoded) }.getOrNull() }
-            }
-            .sortedByDescending(LearningJournalEntry::createdAtMillis)
-
-    fun saveLearningEntry(entry: LearningJournalEntry) {
-        val existingIds = prefs.getStringSet(LEARNING_JOURNAL_IDS, emptySet()).orEmpty().toSet()
-        val existingEntries = existingIds.mapNotNull { id ->
-            prefs.getString(LEARNING_JOURNAL_ENTRY_PREFIX + id, null)
-                ?.let { encoded -> runCatching { LearningJournalCodec.decode(encoded) }.getOrNull() }
-        }
-        val retainedEntries = (existingEntries.filterNot { it.id() == entry.id() } + entry)
-            .sortedByDescending(LearningJournalEntry::createdAtMillis)
-            .take(MAX_LEARNING_JOURNAL_ENTRIES)
-        val retainedIds = retainedEntries.map(LearningJournalEntry::id).toSet()
-        val editor = prefs.edit()
-        (existingIds - retainedIds).forEach { editor.remove(LEARNING_JOURNAL_ENTRY_PREFIX + it) }
-        retainedEntries.forEach { saved ->
-            editor.putString(LEARNING_JOURNAL_ENTRY_PREFIX + saved.id(), LearningJournalCodec.encode(saved))
-        }
-        check(editor.putStringSet(LEARNING_JOURNAL_IDS, retainedIds).commit()) {
-            "Could not save the learning journal"
-        }
-    }
 }
 
-private class RestoredGame(
-    val gameId: Long,
-    val session: GameSession?,
-    val pendingDeal: PendingDealState?,
-    val failed: Boolean
-)
+private class RestoredGame(val gameId: Long, val session: GameSession?, val failed: Boolean)
 
 private fun restoreSavedGame(store: ScoreStore, genome: PolicyGenome): RestoredGame {
-    val savedSession = store.savedSession() ?: return RestoredGame(0L, null, store.pendingDeal(), false)
+    val (gameId, state) = store.savedSession() ?: return RestoredGame(0L, null, false)
     return try {
-        RestoredGame(savedSession.first, GameSession.restore(savedSession.second, genome), null, false)
+        RestoredGame(gameId, GameSession.restore(state, genome), false)
     } catch (invalid: RuntimeException) {
         store.clearSession()
-        RestoredGame(0L, null, store.pendingDeal(), true)
+        RestoredGame(0L, null, true)
     }
 }
 
@@ -283,15 +165,8 @@ private fun GameScreen(genome: PolicyGenome, store: ScoreStore, share: (String) 
     val restored = remember { restoreSavedGame(store, genome) }
     val restoredSnapshot = remember { restored.session?.snapshot(Suit.EICHEL) }
     var gameId by remember { mutableLongStateOf(restored.gameId) }
-    var pendingDeck by remember {
-        mutableStateOf(restored.pendingDeal?.let { Deck(it.deckCards) } ?: shuffledDeck())
-    }
-    var pendingHands by remember { mutableStateOf(restored.pendingDeal?.hands) }
-    var awaitingCut by remember { mutableStateOf(restored.pendingDeal?.stage == "CUT") }
-    var awaitingKlopfen by remember { mutableStateOf(restored.pendingDeal?.stage == "KLOPFEN") }
-    var vorhandSeat by remember {
-        mutableIntStateOf(restored.session?.vorhandSeat() ?: restored.pendingDeal?.vorhandSeat ?: 0)
-    }
+    var pendingDeck by remember { mutableStateOf(shuffledDeck()) }
+    var awaitingCut by remember { mutableStateOf(restored.session == null) }
     var session by remember { mutableStateOf(restored.session) }
     var snapshot by remember { mutableStateOf(restoredSnapshot) }
     var soloSuit by remember { mutableStateOf(Suit.EICHEL) }
@@ -299,64 +174,30 @@ private fun GameScreen(genome: PolicyGenome, store: ScoreStore, share: (String) 
         mutableIntStateOf(restoredSnapshot?.let { it.completedTricks().size * 4 + it.tableCards().size } ?: 0)
     }
     var clearedTricks by remember { mutableIntStateOf(restoredSnapshot?.completedTricks()?.size ?: 0) }
-    var collectingTrick by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf<GameCard?>(null) }
     var showLastTrick by remember { mutableStateOf(false) }
-    var bettingCountdownTenths by remember { mutableIntStateOf(20) }
     var scores by remember { mutableStateOf(store.scores()) }
     var outcome by remember { mutableStateOf<GameSession.Outcome?>(null) }
     var finishedRecord by remember { mutableStateOf<GameRecord?>(null) }
     var settled by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
-    var choosingGame by remember { mutableStateOf(restoredSnapshot?.humanCallPending() == true) }
-    var visibleBidMessage by remember { mutableStateOf<GameSession.BidMessage?>(null) }
-    var bidConversationActive by remember {
-        mutableStateOf(restoredSnapshot?.stage() == GameSession.Stage.BIDDING
-            && restoredSnapshot.bidMessages().isNotEmpty())
-    }
-    var bidMessageIndex by remember { mutableIntStateOf(0) }
     var importOpen by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf<String?>(null) }
     var notice by remember {
         mutableStateOf(if (restored.failed) "Die gespeicherte Partie konnte nicht geladen werden." else null)
     }
-    var reviews by remember { mutableStateOf<List<PostGameAnalyzer.GameReview>>(emptyList()) }
+    var review by remember { mutableStateOf<PostGameAnalyzer.GameReview?>(null) }
     var reviewRecord by remember { mutableStateOf<GameRecord?>(null) }
-    var learningEntries by remember { mutableStateOf(store.learningEntries()) }
-    var learningJournalOpen by remember { mutableStateOf(false) }
-    var counterfactual by remember { mutableStateOf<PostGameAnalyzer.CounterfactualLine?>(null) }
 
     fun persist(next: GameSession.Snapshot?) {
         snapshot = next
         session?.let { store.saveSession(gameId, it.saveState()) }
     }
 
-    fun deal(cutCards: Int?) {
-        cutCards?.let { pendingDeck.cut(it) }
-        pendingHands = pendingDeck.deal4x8()
-        awaitingCut = false
-        awaitingKlopfen = true
-        store.savePendingDeal(vorhandSeat, "KLOPFEN", pendingDeck, pendingHands)
-    }
-
-    fun finishDeal(humanKlopfen: Boolean) {
-        val hands = pendingHands ?: return
-        val created = GameSession(hands, genome, vorhandSeat, humanKlopfen, store.pendingStockDoubles())
-        gameId = System.currentTimeMillis()
-        session = created
-        persist(created.snapshot(soloSuit))
-        pendingHands = null
-        awaitingKlopfen = false
-        choosingGame = false
-    }
-
-    fun startDeal(advanceVorhand: Boolean) {
+    fun newDeal() {
         store.clearSession()
-        store.clearPendingDeal()
-        if (advanceVorhand) vorhandSeat = (vorhandSeat + 1) % 4
         pendingDeck = shuffledDeck()
-        pendingHands = null
-        awaitingKlopfen = false
+        awaitingCut = true
         session = null
         snapshot = null
         displayedPlays = 0
@@ -366,70 +207,32 @@ private fun GameScreen(genome: PolicyGenome, store: ScoreStore, share: (String) 
         outcome = null
         finishedRecord = null
         settled = false
-        if (GameSession.cutterSeat(vorhandSeat) == 3) {
-            awaitingCut = true
-            store.savePendingDeal(vorhandSeat, "CUT", pendingDeck, null)
-        } else {
-            pendingDeck.cut(Random().nextInt(1, 32))
-            deal(null)
-        }
     }
 
-    fun newDeal() = startDeal(advanceVorhand = true)
-
-    fun chooseNoGamePolicy(policy: SchafkopfConfig.NoGamePolicy) {
-        val result = session?.selectNoGamePolicy(policy) ?: return
-        if (result == GameSession.NoGameSelectionResult.NOT_IMPLEMENTED) {
-            notice = "Gibts noch ned!"
-            return
-        }
-        store.savePendingStockDoubles(session?.stockDoubles() ?: 0)
-        newDeal()
-        if (result == GameSession.NoGameSelectionResult.STOCK_MAXED) {
-            notice = "Max. Stock erreicht!"
-        }
+    fun deal(cutCards: Int?) {
+        cutCards?.let { pendingDeck.cut(it) }
+        val created = GameSession(pendingDeck.deal4x8(), genome)
+        gameId = System.currentTimeMillis()
+        session = created
+        persist(created.snapshot(soloSuit))
+        awaitingCut = false
     }
 
-    fun runReview(record: GameRecord) {
+    fun runReview(record: GameRecord, seat: Int) {
         busy = "Nachkarteln läuft …"
         scope.launch {
             val result = withContext(Dispatchers.Default) {
                 runCatching {
                     val rules = RuleEngine()
                     PostGameAnalyzer(rules, SimpleBot(rules, true, genome), REVIEW_SAMPLES)
-                        .reviewAll(record, System.nanoTime())
+                        .review(record, seat, System.nanoTime())
                 }
             }
             busy = null
             result.onSuccess {
-                reviews = it
+                review = it
                 reviewRecord = record
-                val proposals = PostGameAnalyzer.learningProposals(it)
-                if (proposals.isNotEmpty()) {
-                    val entry = LearningJournalEntry(
-                        UUID.nameUUIDFromBytes(record.toText().toByteArray(Charsets.UTF_8)).toString(),
-                        System.currentTimeMillis(), record.toText(), proposals);
-                    runCatching { store.saveLearningEntry(entry) }
-                        .onSuccess { learningEntries = store.learningEntries() }
-                        .onFailure { notice = "Vorschläge konnten nicht gespeichert werden: ${it.message}" }
-                }
             }.onFailure { notice = "Nachkarteln nicht möglich: ${it.message}" }
-        }
-    }
-
-    fun runCounterfactual(record: GameRecord, playIndex: Int, alternative: GameCard) {
-        busy = "Gegenfaktische Partie wird ausgespielt …"
-        scope.launch {
-            val result = withContext(Dispatchers.Default) {
-                runCatching {
-                    val rules = RuleEngine()
-                    PostGameAnalyzer(rules, SimpleBot(rules, true, genome), REVIEW_SAMPLES)
-                        .simulateAlternative(record, playIndex, alternative)
-                }
-            }
-            busy = null
-            result.onSuccess { counterfactual = it }
-                .onFailure { notice = "Gegenfaktische Partie nicht möglich: ${it.message}" }
         }
     }
 
@@ -445,46 +248,19 @@ private fun GameScreen(genome: PolicyGenome, store: ScoreStore, share: (String) 
     val bidding = stage == GameSession.Stage.BIDDING
     val canPlay = stage == GameSession.Stage.TRICK_PLAY && current.yourTurn() && caughtUp
     val legal = if (canPlay) current?.legalCards().orEmpty() else emptyList()
-    val hand = if (awaitingKlopfen) {
-        pendingHands?.getOrNull(3)?.take(4).orEmpty()
-    } else {
-        current?.let(::sortHandForSnapshot).orEmpty()
-    }
+    val hand = current?.let(::sortHandForSnapshot).orEmpty()
     val eyes = names.map { name ->
         completedTricks.take(clearedTricks).filter { it.winnerName() == name }.sumOf { it.points() }
     }
-    val cardsLeft = names.map { name ->
-        when {
-            awaitingKlopfen -> 4
-            current == null -> 8
-            else -> 8 - shownPlays.count { it.playerName() == name }
-        }
-    }
-    val callerSeat = current?.contractCallerSeat() ?: -1
+    val cardsLeft = names.map { name -> if (current == null) 8 else 8 - shownPlays.count { it.playerName() == name } }
+    val seatCalls = current?.seatCalls().orEmpty()
+    val callerSeat = seatCalls.indexOfLast { it != null && it != "Weiter" }
 
-    LaunchedEffect(current?.stage(), current?.bidMessages()?.size) {
-        val messages = current?.bidMessages().orEmpty()
-        if (current?.stage() == GameSession.Stage.BIDDING && bidMessageIndex < messages.size) {
-            bidConversationActive = true
-            while (bidMessageIndex < messages.size) {
-                visibleBidMessage = messages[bidMessageIndex]
-                bidMessageIndex += 1
-                delay(700)
-            }
-            visibleBidMessage = null
-            bidConversationActive = false
-        }
-    }
-
-    LaunchedEffect(session, allPlays.size, bidConversationActive) {
-        while (bidConversationActive) delay(40)
+    LaunchedEffect(session, allPlays.size) {
         while (true) {
             if (displayedPlays - clearedTricks * 4 >= 4) {
-                delay(1_000)
-                collectingTrick = true
-                delay(450)
+                delay(1200)
                 clearedTricks += 1
-                collectingTrick = false
                 continue
             }
             if (displayedPlays >= allPlays.size) {
@@ -515,49 +291,9 @@ private fun GameScreen(genome: PolicyGenome, store: ScoreStore, share: (String) 
         persist(session?.playHumanCard(card, soloSuit))
     }
 
-    fun continueBettingWindow() = persist(session?.continueAfterBettingWindow(soloSuit))
-
-    fun callKontra() {
-        val activeSession = session ?: return
-        if (activeSession.callKontra(activeSession.humanSeat())) {
-            persist(activeSession.snapshot(soloSuit))
-        }
-    }
-
-    fun callRetour() {
-        val activeSession = session ?: return
-        if (activeSession.callRetour(activeSession.humanSeat())) {
-            persist(activeSession.snapshot(soloSuit))
-        }
-    }
-
-    LaunchedEffect(session, current?.tableCards()?.size, current?.bettingWindowOpen(),
-        current?.humanCanCallKontra(), current?.humanCanCallRetour()) {
-        val window = current ?: return@LaunchedEffect
-        if (!window.bettingWindowOpen()) return@LaunchedEffect
-        if (!window.humanCanCallKontra() && !window.humanCanCallRetour()) {
-            continueBettingWindow()
-            return@LaunchedEffect
-        }
-        bettingCountdownTenths = 20
-        repeat(20) {
-            delay(100)
-            bettingCountdownTenths = (bettingCountdownTenths - 1).coerceAtLeast(0)
-        }
-        continueBettingWindow()
-    }
-
-    LaunchedEffect(Unit) {
-        if (restored.session == null && restored.pendingDeal == null) startDeal(advanceVorhand = false)
-    }
-
     val status = when {
-        awaitingKlopfen -> "Vier Karten · Klopfen?"
         awaitingCut -> "Neues Spiel – Rückhand hebt ab"
-        current?.stage() == GameSession.Stage.FINISHED -> "Spiel beendet"
-        bidConversationActive -> "Ansagerunde"
-        choosingGame -> "Spielwahl"
-        bidding -> "Ansagen"
+        bidding -> "Wer spielt?"
         current == null -> ""
         current.contractType() == GameType.RAMSCH -> "Keiner spielt – Ramsch"
         else -> {
@@ -565,17 +301,6 @@ private fun GameScreen(genome: PolicyGenome, store: ScoreStore, share: (String) 
             val verb = if (callerSeat == 3) "spielst" else "spielt"
             "$who $verb ${contractPhrase(current)}"
         }
-    }
-    val stakeMultiplier = session?.stakeMultiplier() ?: 1
-    val statusLabel = if (stakeMultiplier > 1) "$status · Tarif ×$stakeMultiplier" else status
-    val stakeLine = current?.stake()?.let { stake ->
-        listOfNotNull(
-            "${stake.klopferCount()} Klopfer",
-            "Stock ×${stake.stockFactor()}",
-            if (stake.kontra()) "Kontra" else null,
-            if (stake.retour()) "Retour" else null,
-            "Gesamt ×${stake.totalMultiplier()}"
-        ).joinToString(" · ")
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -595,14 +320,10 @@ private fun GameScreen(genome: PolicyGenome, store: ScoreStore, share: (String) 
                             onClick = { menuOpen = false; importOpen = true })
                         finishedRecord?.let { record ->
                             DropdownMenuItem(text = { Text("Letzte Partie nachkarteln") },
-                                onClick = { menuOpen = false; runReview(record) })
+                                onClick = { menuOpen = false; runReview(record, 3) })
                             DropdownMenuItem(text = { Text("Letzte Partie teilen") },
                                 onClick = { menuOpen = false; share(record.toText()) })
                         }
-                        DropdownMenuItem(
-                            text = { Text("Lernjournal (${learningEntries.size})") },
-                            onClick = { menuOpen = false; learningJournalOpen = true }
-                        )
                         DropdownMenuItem(text = { Text("Punktestand zurücksetzen") }, onClick = {
                             menuOpen = false
                             store.reset()
@@ -610,11 +331,10 @@ private fun GameScreen(genome: PolicyGenome, store: ScoreStore, share: (String) 
                         })
                     }
                 }
-                Column(Modifier.weight(1f).padding(end = 40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(statusLabel, color = Color(0xFFF3EBD8), fontSize = 19.sp, fontFamily = FontFamily.Serif,
-                        textAlign = TextAlign.Center)
-                    stakeLine?.let { Text(it, color = Color(0xFFCBBFA6), fontSize = 10.sp, textAlign = TextAlign.Center) }
-                }
+                Text(
+                    status, color = Color(0xFFF3EBD8), fontSize = 19.sp, fontFamily = FontFamily.Serif,
+                    textAlign = TextAlign.Center, modifier = Modifier.weight(1f).padding(end = 40.dp)
+                )
             }
 
             Box(
@@ -623,18 +343,16 @@ private fun GameScreen(genome: PolicyGenome, store: ScoreStore, share: (String) 
                     .fillMaxWidth()
                     .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {
                         selected = null
-                        if (canPlay && completedTricks.isNotEmpty() && clearedTricks > 0) {
-                            showLastTrick = !showLastTrick
-                        }
+                        if (completedTricks.isNotEmpty() && clearedTricks > 0) showLastTrick = !showLastTrick
                     }
             ) {
-                OpponentSeat(names[1], scores[1], cardsLeft[1], eyes[1], visibleBidMessage?.takeIf { it.seat() == 1 }?.text(),
+                OpponentSeat(names[1], scores[1], cardsLeft[1], eyes[1], seatCalls.getOrNull(1).takeIf { bidding },
                     active = isActive(current, 1, caughtUp), caller = callerSeat == 1 && !bidding,
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = 18.dp))
-                OpponentSeat(names[0], scores[0], cardsLeft[0], eyes[0], visibleBidMessage?.takeIf { it.seat() == 0 }?.text(),
+                OpponentSeat(names[0], scores[0], cardsLeft[0], eyes[0], seatCalls.getOrNull(0).takeIf { bidding },
                     active = isActive(current, 0, caughtUp), caller = callerSeat == 0 && !bidding,
                     modifier = Modifier.align(Alignment.CenterStart).padding(start = 6.dp, bottom = 60.dp))
-                OpponentSeat(names[2], scores[2], cardsLeft[2], eyes[2], visibleBidMessage?.takeIf { it.seat() == 2 }?.text(),
+                OpponentSeat(names[2], scores[2], cardsLeft[2], eyes[2], seatCalls.getOrNull(2).takeIf { bidding },
                     active = isActive(current, 2, caughtUp), caller = callerSeat == 2 && !bidding,
                     modifier = Modifier.align(Alignment.CenterEnd).padding(end = 6.dp, bottom = 60.dp))
 
@@ -647,10 +365,7 @@ private fun GameScreen(genome: PolicyGenome, store: ScoreStore, share: (String) 
                 } else {
                     TrickArea(
                         visibleTrick.map { names.indexOf(it.playerName()) to it.card() },
-                        Modifier.align(Alignment.Center),
-                        if (collectingTrick) {
-                            completedTricks.getOrNull(clearedTricks)?.winnerName()?.let(names::indexOf)
-                        } else null
+                        Modifier.align(Alignment.Center)
                     )
                     if (trickFull) {
                         val done = completedTricks.getOrNull(clearedTricks)
@@ -666,9 +381,7 @@ private fun GameScreen(genome: PolicyGenome, store: ScoreStore, share: (String) 
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    NamePill("${names[3]}: ${formatEuro(scores[3])}", HumanRed,
-                        highlight = canPlay || (bidding && !awaitingCut))
-                    visibleBidMessage?.takeIf { it.seat() == 3 }?.let { SpeechBubble(it.text()) }
+                    NamePill("${names[3]}: ${scores[3]}", HumanRed, highlight = canPlay || (bidding && !awaitingCut))
                     if (eyes[3] > 0) TrickPile(eyes[3])
                     if (callerSeat == 3 && !bidding) CallerBadge()
                 }
@@ -683,41 +396,13 @@ private fun GameScreen(genome: PolicyGenome, store: ScoreStore, share: (String) 
                 onSwipe = ::playCard)
         }
 
-        if (bidding && !current.awaitingNoGameChoice() && !bidConversationActive) {
-            BiddingPanel(current, names, soloSuit, choosingGame,
-                onStartPlay = {
-                    choosingGame = true
-                    persist(session?.prepareHumanPlay(soloSuit))
-                },
+        if (bidding && current != null) {
+            BiddingPanel(current, names, soloSuit,
                 onSuit = { suit -> soloSuit = suit; snapshot = session?.snapshot(suit) },
-                onAnnounce = { id -> choosingGame = false; persist(session?.announce(id, soloSuit)) },
-                onUnavailableOption = { notice = "Gibts noch ned!" },
-                onCancelGameSelection = { choosingGame = false; persist(session?.cancelHumanPlay(soloSuit)) },
-                onPass = { choosingGame = false; persist(session?.pass(soloSuit)) },
+                onAnnounce = { id -> persist(session?.announce(id, soloSuit)) },
+                onPass = { persist(session?.pass(soloSuit)) },
                 modifier = Modifier.align(Alignment.Center).padding(horizontal = 18.dp))
         }
-
-            if (current?.awaitingNoGameChoice() == true && !bidConversationActive) {
-                NoGamePolicyDialog(onChoose = ::chooseNoGamePolicy)
-            }
-
-            current?.takeIf {
-                it.bettingWindowOpen() && (it.humanCanCallKontra() || it.humanCanCallRetour())
-            }?.let { window ->
-                val isRetour = window.humanCanCallRetour()
-                val action = if (isRetour) ::callRetour else ::callKontra
-                val callName = if (isRetour) "Re" else "Kontra"
-                val remaining = "${bettingCountdownTenths / 10},${bettingCountdownTenths % 10} s"
-                AlertDialog(
-                    onDismissRequest = { },
-                    title = { Text("$callName geben?") },
-                    text = { Text("Noch $remaining") },
-                    confirmButton = {
-                        TextButton(onClick = action) { Text(callName) }
-                    },
-                    containerColor = Color(0xFFF4EEDF)
-                )
-            }
 
         busy?.let { BusyOverlay(it) }
     }
@@ -735,73 +420,24 @@ private fun GameScreen(genome: PolicyGenome, store: ScoreStore, share: (String) 
         )
     }
 
-    if (awaitingKlopfen) {
-        AlertDialog(
-            onDismissRequest = { },
-            title = { Text("Nach den ersten vier Karten") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Möchtest du den Tarif verdoppeln?")
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        hand.forEach { card ->
-                            key(card) { PlayingCard(card, Modifier.size(56.dp, 75.dp)) }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { finishDeal(true) }) { Text("Klopfen") }
-            },
-            dismissButton = {
-                TextButton(onClick = { finishDeal(false) }) { Text("Weiter") }
-            },
-            containerColor = Color(0xFFF4EEDF)
-        )
-    }
-
     outcome?.let { result ->
-        ResultDialog(result, scores,
+        ResultDialog(result, names, scores, contractLine = status,
             canReview = finishedRecord != null,
-            onReview = { finishedRecord?.let { runReview(it) } },
+            onReview = { finishedRecord?.let { runReview(it, 3) } },
             onNext = { newDeal() })
     }
 
     if (importOpen) {
-        ImportGameDialog(onDismiss = { importOpen = false }, onAnalyze = { record ->
+        ImportGameDialog(onDismiss = { importOpen = false }, onAnalyze = { record, seat ->
             importOpen = false
-            runReview(record)
+            runReview(record, seat)
         })
     }
 
-    if (reviews.isNotEmpty()) {
-        ReviewScreen(
-            reviews = reviews,
-            proposalCount = PostGameAnalyzer.learningProposals(reviews).size,
-            onClose = { reviews = emptyList() },
-            onShare = {
-                val recordText = reviewRecord?.toText().orEmpty()
-                val reports = reviews.joinToString("\n") { PostGameAnalyzer.report(it) }
-                share("$recordText\n$reports")
-            },
-            onTryAlternative = { decision, card ->
-                reviewRecord?.let { runCounterfactual(it, decision.playIndex(), card) }
-            }
-        )
-    }
-
-    if (learningJournalOpen) {
-        LearningJournalDialog(
-            entries = learningEntries,
-            onClose = { learningJournalOpen = false },
-            onReplay = { entry, proposal ->
-                learningJournalOpen = false
-                runCounterfactual(entry.gameRecord(), proposal.playIndex(), proposal.suggested())
-            }
-        )
-    }
-
-    counterfactual?.let { line ->
-        CounterfactualDialog(line, onClose = { counterfactual = null })
+    review?.let { result ->
+        ReviewScreen(result, onClose = { review = null }, onShare = {
+            share((reviewRecord?.toText().orEmpty()) + "\n" + PostGameAnalyzer.report(result))
+        })
     }
 
     notice?.let { text ->
@@ -828,19 +464,13 @@ private fun contractPhrase(snapshot: GameSession.Snapshot): String {
     }
 }
 
-private fun formatEuro(cents: Int): String {
-    val absoluteCents = abs(cents.toLong())
-    val sign = if (cents < 0) "−" else ""
-    return "$sign${absoluteCents / 100},${(absoluteCents % 100).toString().padStart(2, '0')} €"
-}
-
 @Composable
 private fun OpponentSeat(
     name: String, score: Int, cards: Int, eyes: Int, call: String?, active: Boolean, caller: Boolean,
     modifier: Modifier = Modifier
 ) {
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        NamePill("$name: ${formatEuro(score)}", OpponentBlue, highlight = active)
+        NamePill("$name: $score", OpponentBlue, highlight = active)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             FannedBacks(cards)
             if (eyes > 0) TrickPile(eyes)
@@ -851,20 +481,6 @@ private fun OpponentSeat(
                 Text(it, color = Color(0xFF2A2118), fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
             }
         }
-    }
-}
-
-@Composable
-private fun SpeechBubble(text: String) {
-    Surface(shape = RoundedCornerShape(8.dp), color = Color(0xFFF8F0DE), shadowElevation = 3.dp) {
-        Text(
-            text,
-            color = Color(0xFF2A2118),
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-        )
     }
 }
 
@@ -915,11 +531,7 @@ private fun Caption(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun TrickArea(
-    cards: List<Pair<Int, GameCard>>,
-    modifier: Modifier = Modifier,
-    collectingForSeat: Int? = null
-) {
+private fun TrickArea(cards: List<Pair<Int, GameCard>>, modifier: Modifier = Modifier) {
     Box(modifier.size(230.dp, 270.dp), contentAlignment = Alignment.Center) {
         cards.forEach { (seat, card) ->
             val (dx, dy, angle) = when (seat) {
@@ -928,35 +540,8 @@ private fun TrickArea(
                 2 -> Triple(60.dp, (-4).dp, 8f)
                 else -> Triple(4.dp, 60.dp, -3f)
             }
-            val source = when (seat) {
-                0 -> (-142).dp to 0.dp
-                1 -> 0.dp to (-165).dp
-                2 -> 142.dp to 0.dp
-                else -> 0.dp to 165.dp
-            }
-            val destination = when (collectingForSeat) {
-                0 -> (-145).dp to 82.dp
-                1 -> 0.dp to (-160).dp
-                2 -> 145.dp to 82.dp
-                3 -> 0.dp to 165.dp
-                else -> dx to dy
-            }
-            var entered by remember(card) { mutableStateOf(false) }
-            LaunchedEffect(card) { entered = true }
-            val animatedX by animateDpAsState(
-                if (entered) destination.first else source.first,
-                animationSpec = tween(360), label = "trick-card-x"
-            )
-            val animatedY by animateDpAsState(
-                if (entered) destination.second else source.second,
-                animationSpec = tween(360), label = "trick-card-y"
-            )
-            val scale = if (collectingForSeat != null) 0.62f else 1f
             key(card) {
-                PlayingCard(card, Modifier.offset(animatedX, animatedY).rotate(angle).graphicsLayer {
-                    scaleX = scale
-                    scaleY = scale
-                }.size(72.dp, 96.dp))
+                PlayingCard(card, Modifier.offset(dx, dy).rotate(angle).size(72.dp, 120.dp))
             }
         }
     }
@@ -969,7 +554,7 @@ private fun HandRow(
 ) {
     BoxWithConstraints(Modifier.fillMaxWidth().height(172.dp).padding(horizontal = 6.dp)) {
         val cardWidth = 80.dp
-        val cardHeight = 107.dp
+        val cardHeight = 132.dp
         if (hand.isEmpty()) return@BoxWithConstraints
         val step = if (hand.size == 1) 0.dp else minOf(cardWidth * 0.98f, (maxWidth - cardWidth) / (hand.size - 1))
         val start = (maxWidth - cardWidth - step * (hand.size - 1)) / 2
@@ -1004,105 +589,59 @@ private fun HandRow(
 
 @Composable
 private fun BiddingPanel(
-    snapshot: GameSession.Snapshot, names: List<String>, soloSuit: Suit, choosingGame: Boolean,
-    onStartPlay: () -> Unit, onSuit: (Suit) -> Unit, onAnnounce: (String) -> Unit,
-    onUnavailableOption: () -> Unit,
-    onCancelGameSelection: () -> Unit,
-    onPass: () -> Unit, modifier: Modifier = Modifier
+    snapshot: GameSession.Snapshot, names: List<String>, soloSuit: Suit,
+    onSuit: (Suit) -> Unit, onAnnounce: (String) -> Unit, onPass: () -> Unit, modifier: Modifier = Modifier
 ) {
-    val hasPriorAnnouncement = snapshot.seatCalls().any { it == "Spiele!" || it == "Auch!" }
-    val hasLegalGame = snapshot.bidOptions().any { it.enabled() && it.implemented() }
     Surface(modifier, shape = RoundedCornerShape(16.dp), color = Color(0xEB231B14), shadowElevation = 8.dp) {
-        Column(Modifier.padding(14.dp).heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(if (choosingGame) "Welches Spiel möchtest du spielen?" else "Du bist dran",
-                    color = Color(0xFFF3EBD8), fontSize = 20.sp, fontFamily = FontFamily.Serif,
-                    fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                if (choosingGame) TextButton(onClick = onCancelGameSelection) { Text("Zurück") }
-            }
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Spielst du?", color = Color(0xFFF3EBD8), fontSize = 20.sp, fontFamily = FontFamily.Serif,
+                fontWeight = FontWeight.Bold)
             Text(
-                (0..3).joinToString("  ·  ") { "${names[it]}: ${snapshot.seatCalls()[it] ?: "–"}" },
+                (0..2).joinToString("  ·  ") { "${names[it]}: ${snapshot.seatCalls()[it] ?: "–"}" },
                 color = Color(0xFFCBBFA6), fontSize = 13.sp
             )
-            if (choosingGame) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    listOf(Suit.EICHEL, Suit.GRAS, Suit.HERZ, Suit.SCHELLEN).forEach { suit ->
-                        FilterChip(
-                            selected = soloSuit == suit,
-                            onClick = { onSuit(suit) },
-                            label = { Text(suitLabel(suit), fontSize = 12.sp) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                containerColor = Color(0xFF3B3027), labelColor = Color.White,
-                                selectedContainerColor = Gold, selectedLabelColor = Color(0xFF2A2118)
-                            )
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf(Suit.EICHEL, Suit.GRAS, Suit.HERZ, Suit.SCHELLEN).forEach { suit ->
+                    FilterChip(
+                        selected = soloSuit == suit,
+                        onClick = { onSuit(suit) },
+                        label = { Text(suitLabel(suit), fontSize = 12.sp) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            containerColor = Color(0xFF3B3027), labelColor = Color.White,
+                            selectedContainerColor = Gold, selectedLabelColor = Color(0xFF2A2118)
                         )
-                    }
-                }
-                Text("Spielart wählen", color = Color(0xFF9C9079), fontSize = 11.sp)
-                snapshot.bidOptions().chunked(2).forEach { row ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        row.forEach { option ->
-                            Button(
-                                onClick = { if (option.implemented()) onAnnounce(option.id()) else onUnavailableOption() },
-                                enabled = option.enabled() || !option.implemented(),
-                                modifier = Modifier.weight(1f).height(44.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFFF1E7CF), contentColor = Color(0xFF2A2118),
-                                    disabledContainerColor = Color(0xFF4A4038), disabledContentColor = Color(0xFF8E8372)
-                                )
-                            ) { Text(option.label(), fontSize = 13.sp, textAlign = TextAlign.Center) }
-                        }
-                        if (row.size == 1) Box(Modifier.weight(1f))
-                    }
-                }
-            } else {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = onStartPlay,
-                        enabled = hasLegalGame,
-                        modifier = Modifier.weight(1f).height(48.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Color(0xFF2A2118))
-                    ) { Text(if (hasPriorAnnouncement) "Auch!" else "Spiele!", fontWeight = FontWeight.Bold) }
-                    Button(
-                        onClick = onPass,
-                        modifier = Modifier.weight(1f).height(48.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF1E7CF), contentColor = Color(0xFF2A2118))
-                    ) { Text("Weiter") }
+                    )
                 }
             }
+            Text("Farbe gilt für Solo", color = Color(0xFF9C9079), fontSize = 11.sp)
+            snapshot.bidOptions().chunked(2).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    row.forEach { option ->
+                        Button(
+                            onClick = { onAnnounce(option.id()) },
+                            enabled = option.enabled(),
+                            modifier = Modifier.weight(1f).height(44.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFF1E7CF), contentColor = Color(0xFF2A2118),
+                                disabledContainerColor = Color(0xFF4A4038), disabledContentColor = Color(0xFF8E8372)
+                            )
+                        ) { Text(option.label(), fontSize = 13.sp, textAlign = TextAlign.Center) }
+                    }
+                    if (row.size == 1) Box(Modifier.weight(1f))
+                }
+            }
+            Button(
+                onClick = onPass,
+                modifier = Modifier.fillMaxWidth().height(46.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Color(0xFF2A2118))
+            ) { Text("Weiter", fontWeight = FontWeight.Bold) }
         }
     }
 }
 
 @Composable
-private fun NoGamePolicyDialog(onChoose: (SchafkopfConfig.NoGamePolicy) -> Unit) {
-    AlertDialog(
-        onDismissRequest = { },
-        title = { Text("Keiner spielt") },
-        text = {
-            Column {
-                SchafkopfConfig.NoGamePolicy.values().forEach { policy ->
-                    TextButton(onClick = { onChoose(policy) }) {
-                        Text(when (policy) {
-                            SchafkopfConfig.NoGamePolicy.STOCK -> "Stock"
-                            SchafkopfConfig.NoGamePolicy.ZAMMWERFEN -> "Zusammenwerfen / neu geben"
-                            SchafkopfConfig.NoGamePolicy.RAMSCH -> "Ramsch"
-                            SchafkopfConfig.NoGamePolicy.KREUZBOCK -> "Kreuzbock"
-                            SchafkopfConfig.NoGamePolicy.MUSS_SPIEL -> "Muss-Spiel"
-                        })
-                    }
-                }
-            }
-        },
-        confirmButton = { },
-        containerColor = Color(0xFFF4EEDF)
-    )
-}
-
-@Composable
 private fun ResultDialog(
-    result: GameSession.Outcome, scores: List<Int>,
+    result: GameSession.Outcome, names: List<String>, scores: List<Int>, contractLine: String,
     canReview: Boolean, onReview: () -> Unit, onNext: () -> Unit
 ) {
     val background = if (result.humanWon()) Color(0xFF2E6B3A) else Color(0xFF8E2A24)
@@ -1111,22 +650,17 @@ private fun ResultDialog(
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (result.humanWon()) "Gewonnen!" else "Verloren", color = Color.White, fontSize = 28.sp,
                     fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold)
-                Text(result.contractName(), color = Color(0xFFF3EBD8))
+                Text(contractLine, color = Color(0xFFF3EBD8))
                 Text("Deine Partei: ${result.humanPartyEyes()} Augen", color = Color.White, fontWeight = FontWeight.SemiBold)
                 Text(result.description(), color = Color(0xFFE8DCC4), fontSize = 12.sp)
                 Column(Modifier.padding(vertical = 6.dp)) {
-                    result.seatOutcomes().forEachIndexed { seat, playerResult ->
+                    names.forEachIndexed { seat, name ->
                         val points = result.seatPoints()[seat]
                         Row(Modifier.fillMaxWidth()) {
-                            Column(Modifier.weight(1f)) {
-                                Text(playerResult.name(), color = Color.White)
-                                Text("${playerResult.eyes()} Augen · ${if (playerResult.won()) "Gewonnen" else "Verloren"}",
-                                    color = Color(0xFFE8DCC4), fontSize = 12.sp)
-                            }
-                            Text(if (points > 0) "+${formatEuro(points)}" else formatEuro(points),
-                                color = Color.White, fontWeight = FontWeight.Bold,
-                                modifier = Modifier.width(78.dp), textAlign = TextAlign.End)
-                            Text(formatEuro(scores[seat]), color = Color(0xFFE8DCC4), modifier = Modifier.width(70.dp),
+                            Text(name, color = Color.White, modifier = Modifier.weight(1f))
+                            Text(if (points > 0) "+$points" else "$points", color = Color.White,
+                                fontWeight = FontWeight.Bold, modifier = Modifier.width(60.dp), textAlign = TextAlign.End)
+                            Text("${scores[seat]}", color = Color(0xFFE8DCC4), modifier = Modifier.width(70.dp),
                                 textAlign = TextAlign.End)
                         }
                     }
@@ -1214,8 +748,7 @@ private fun sortHandForSnapshot(snapshot: GameSession.Snapshot): List<GameCard> 
         GameType.KREUZBOCK -> KreuzbockContract()
         null -> RufspielContract(player, Suit.EICHEL)
     }
-    val contractClosed = snapshot.stage() != GameSession.Stage.BIDDING && snapshot.contractType() != null
-    return HandDisplayOrder.sortForStage(snapshot.hand(), contract, contractClosed)
+    return HandDisplayOrder.sortForContract(snapshot.hand(), contract)
 }
 
 internal fun suitLabel(suit: Suit): String = when (suit) {

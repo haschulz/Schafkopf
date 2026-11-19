@@ -54,7 +54,7 @@ public final class LearningJournalCodec {
             }
             String gameRecord = new String(Base64.getDecoder().decode(properties.getProperty("gameRecord")),
                     StandardCharsets.UTF_8);
-            List<PostGameAnalyzer.LearningProposal> proposals = new ArrayList<>(proposalCount);
+            List<LearningJournalEntry.Proposal> proposals = new ArrayList<>(proposalCount);
             for (int index = 0; index < proposalCount; index++) {
                 proposals.add(decodeProposal(properties, index));
             }
@@ -71,7 +71,7 @@ public final class LearningJournalCodec {
     }
 
     private static void encodeProposal(
-            Properties properties, int index, PostGameAnalyzer.LearningProposal proposal
+            Properties properties, int index, LearningJournalEntry.Proposal proposal
     ) {
         String prefix = "proposal." + index + ".";
         properties.setProperty(prefix + "seat", Integer.toString(proposal.seat()));
@@ -87,9 +87,9 @@ public final class LearningJournalCodec {
         properties.setProperty(prefix + "samples", Integer.toString(proposal.samples()));
     }
 
-    private static PostGameAnalyzer.LearningProposal decodeProposal(Properties properties, int index) {
+    private static LearningJournalEntry.Proposal decodeProposal(Properties properties, int index) {
         String prefix = "proposal." + index + ".";
-        return new PostGameAnalyzer.LearningProposal(
+        return new LearningJournalEntry.Proposal(
                 Integer.parseInt(properties.getProperty(prefix + "seat")),
                 properties.getProperty(prefix + "playerName"),
                 Integer.parseInt(properties.getProperty(prefix + "playIndex")),

@@ -8,8 +8,8 @@ import schafkopf.ai.policy.PolicyGenome;
 import schafkopf.config.SchafkopfConfig;
 import schafkopf.economy.Tariff;
 import schafkopf.model.BettelContract;
-import schafkopf.model.BettingState;
 import schafkopf.model.Card;
+import schafkopf.model.Deck;
 import schafkopf.model.GameContract;
 import schafkopf.model.GameType;
 import schafkopf.model.GeierContract;
@@ -43,17 +43,7 @@ public final class GameSession {
         FINISHED
     }
 
-    public record BidOption(String id, String label, boolean enabled, boolean implemented) {
-    }
-
-    public enum NoGameSelectionResult {
-        STOCK_ADDED,
-        STOCK_MAXED,
-        ZAMMWERFEN,
-        NOT_IMPLEMENTED
-    }
-
-    public record BidMessage(int seat, String text) {
+    public record BidOption(String id, String label, boolean enabled) {
     }
 
     public record TableCard(String playerName, Card card) {
@@ -85,15 +75,7 @@ public final class GameSession {
             TrickSnapshot lastCompletedTrick,
             List<BidOption> bidOptions,
             List<TrickSnapshot> completedTricks,
-                List<String> seatCalls,
-                List<BidMessage> bidMessages,
-                boolean humanCallPending,
-                boolean awaitingNoGameChoice,
-                BettingState.StakeBreakdown stake,
-                boolean bettingWindowOpen,
-                boolean humanCanCallKontra,
-                boolean humanCanCallRetour,
-                int contractCallerSeat
+            List<String> seatCalls
     ) {
         public Snapshot {
             hand = List.copyOf(hand);
@@ -103,17 +85,10 @@ public final class GameSession {
             bidOptions = List.copyOf(bidOptions);
             completedTricks = List.copyOf(completedTricks);
             seatCalls = java.util.Collections.unmodifiableList(new ArrayList<>(seatCalls));
-            bidMessages = List.copyOf(bidMessages);
         }
     }
 
     private static final int HUMAN_SEAT = 3;
-    private static final String CALL_PLAY = "Spiele!";
-    private static final String CALL_AGREE = "Auch!";
-    private static final String CALL_PASS = "Weiter";
-    private static final String DEFAULT_FALSE = "false";
-    private static final String SAUSPIEL_OPTION_PREFIX = "SAUSPIEL_";
-    private static final String FARBWENZ_OPTION_PREFIX = "FARBWENZ_";
     private static final List<Personality> BOT_PERSONALITIES = List.of(
             Personality.MAURER, Personality.SOLIDE, Personality.ZOCKER);
     private static final Set<GameType> SUPPORTED_BID_TYPES = Set.of(
@@ -130,12 +105,6 @@ public final class GameSession {
     private Stage stage = Stage.BIDDING;
     private String message;
     private final String[] seatCalls = new String[4];
-    private final List<BidMessage> bidMessages = new ArrayList<>();
-    private boolean humanCallPending;
-    private String previousHumanCall;
-    private boolean awaitingNoGameChoice;
-    private boolean bettingWindowOpen;
-    private int bettingWindowHandledCardCount = -1;
     private final List<List<Card>> initialHands;
     private final int vorhandSeat;
 
@@ -145,28 +114,10 @@ public final class GameSession {
 
     /** @param vorhandSeat seat left of the dealer: bids first and leads the first trick */
     public GameSession(List<List<Card>> hands, PolicyGenome genome, int vorhandSeat) {
-        this(hands, genome, vorhandSeat, true, false, 0);
+        this(hands, genome, vorhandSeat, true);
     }
 
-    public GameSession(List<List<Card>> hands, PolicyGenome genome, int vorhandSeat, boolean humanKlopfen) {
-        this(hands, genome, vorhandSeat, true, humanKlopfen, 0);
-    }
-
-    public GameSession(
-            List<List<Card>> hands, PolicyGenome genome, int vorhandSeat,
-            boolean humanKlopfen, int pendingStockDoubles
-    ) {
-        this(hands, genome, vorhandSeat, true, humanKlopfen, pendingStockDoubles);
-    }
-
-    private GameSession(
-            List<List<Card>> hands,
-            PolicyGenome genome,
-            int vorhandSeat,
-            boolean runBidding,
-            boolean humanKlopfen,
-            int pendingStockDoubles
-    ) {
+    private GameSession(List<List<Card>> hands, PolicyGenome genome, int vorhandSeat, boolean runBidding) {
         if (vorhandSeat < 0 || vorhandSeat > 3) {
             throw new IllegalArgumentException("Vorhand must be seat 0-3");
         }
@@ -176,9 +127,6 @@ public final class GameSession {
         if (hands.size() != 4 || hands.stream().anyMatch(hand -> hand.size() != 8)
                 || hands.stream().flatMap(List::stream).distinct().count() != 32) {
             throw new IllegalArgumentException("A game session requires four unique eight-card hands");
-        }
-        if (pendingStockDoubles < 0 || pendingStockDoubles > 5) {
-            throw new IllegalArgumentException("pendingStockDoubles must be between 0 and 5");
         }
 
         players = List.of(
@@ -193,32 +141,11 @@ public final class GameSession {
         game = new SchafkopfGame(players, rules, bot, SchafkopfConfig.defaults());
         game.setLogger(ignored -> { });
         game.setCustomHands(hands);
-        if (pendingStockDoubles > 0) {
-            game.bettingState().applyStock(1 << pendingStockDoubles);
-        }
         biddingAdvisor = new GameBiddingAdvisor(
                 rules, genome, ignored -> { }, ContractValueModel.empty());
         rufspielAdvisor = new BiddingAdvisor(rules, genome, ignored -> { }, ContractValueModel.empty());
         if (runBidding) {
-            applyBotKlopfen(genome);
-            if (humanKlopfen) {
-                game.bettingState().applyDouble(human);
-            }
             runBotBidding(true);
-        }
-    }
-
-    private void applyBotKlopfen(PolicyGenome genome) {
-        if (!SchafkopfConfig.defaults().klopfenEnabled()) {
-            return;
-        }
-        BiddingAdvisor advisor = new BiddingAdvisor(rules, genome, ignored -> { }, ContractValueModel.empty());
-        int cardsToCheck = SchafkopfConfig.defaults().klopfenAfterCards();
-        for (Player player : players) {
-            if (!player.equals(human)
-                    && advisor.shouldKlopfen(player, player.hand().subList(0, cardsToCheck), rules)) {
-                game.bettingState().applyDouble(player);
-            }
         }
     }
 
@@ -241,7 +168,7 @@ public final class GameSession {
      */
     public String saveState() {
         Properties state = new Properties();
-        state.setProperty("version", "2");
+        state.setProperty("version", "1");
         state.setProperty("vorhand", String.valueOf(vorhandSeat));
         state.setProperty("stage", stage.name());
         state.setProperty("hands", String.join("|", initialHands.stream().map(GameSession::encodeCards).toList()));
@@ -257,20 +184,6 @@ public final class GameSession {
         game.currentTrickCards().forEach(played -> plays.add(played.card()));
         state.setProperty("plays", encodeCards(plays));
         state.setProperty("message", message == null ? "" : message);
-        state.setProperty("multiplier", Integer.toString(game.bettingState().multiplier()));
-        BettingState.StakeBreakdown stake = game.bettingState().breakdown();
-        state.setProperty("stockFactor", Integer.toString(stake.stockFactor()));
-        state.setProperty("klopferIds", String.join(",", stake.klopferIds()));
-        state.setProperty("additionalKlopfer", Integer.toString(stake.additionalKlopfer()));
-        state.setProperty("kontra", Boolean.toString(stake.kontra()));
-        state.setProperty("retour", Boolean.toString(stake.retour()));
-        state.setProperty("humanCallPending", Boolean.toString(humanCallPending));
-        state.setProperty("previousHumanCall", previousHumanCall == null ? "" : previousHumanCall);
-        state.setProperty("awaitingNoGameChoice", Boolean.toString(awaitingNoGameChoice));
-        state.setProperty("bettingWindowOpen", Boolean.toString(bettingWindowOpen));
-        state.setProperty("bettingWindowHandledCardCount", Integer.toString(bettingWindowHandledCardCount));
-        state.setProperty("bidMessages", String.join("|", bidMessages.stream()
-            .map(entry -> entry.seat() + ";" + entry.text()).toList()));
         StringWriter writer = new StringWriter();
         try {
             state.store(writer, null);
@@ -282,94 +195,24 @@ public final class GameSession {
 
     /** Rebuilds a session saved with {@link #saveState()}; fails if the saved game is inconsistent. */
     public static GameSession restore(String saved, PolicyGenome genome) {
-        Properties state = readSavedProperties(saved);
-        String version = state.getProperty("version");
-        if (!"1".equals(version) && !"2".equals(version)) {
+        Properties state = new Properties();
+        try {
+            state.load(new StringReader(saved));
+        } catch (IOException invalid) {
+            throw new IllegalArgumentException("Unreadable saved game", invalid);
+        }
+        if (!"1".equals(state.getProperty("version"))) {
             throw new IllegalArgumentException("Unsupported saved game version");
         }
         List<List<Card>> hands = java.util.Arrays.stream(state.getProperty("hands", "").split("\\|", -1))
                 .map(GameSession::decodeCards)
                 .toList();
         GameSession session = new GameSession(hands, genome,
-            Integer.parseInt(state.getProperty("vorhand", "0")), false, false, 0);
-        restoreBettingState(session, state, version);
-        restoreBiddingState(session, state);
-        restoreGameState(session, state);
-        return session;
-    }
-
-    private static Properties readSavedProperties(String saved) {
-        Properties state = new Properties();
-        try {
-            state.load(new StringReader(saved));
-            return state;
-        } catch (IOException invalid) {
-            throw new IllegalArgumentException("Unreadable saved game", invalid);
-        }
-    }
-
-    private static void restoreBettingState(GameSession session, Properties state, String version) {
-        BettingState bettingState = session.game.bettingState();
-        int savedMultiplier = Integer.parseInt(state.getProperty("multiplier", "1"));
-        if ("1".equals(version)) {
-            bettingState.restoreLegacyMultiplier(savedMultiplier);
-            return;
-        }
-        restoreKlopfers(session, state, bettingState);
-        int stockFactor = Integer.parseInt(state.getProperty("stockFactor", "1"));
-        if (stockFactor > 1) {
-            bettingState.applyStock(stockFactor);
-        }
-        if (Boolean.parseBoolean(state.getProperty("kontra", DEFAULT_FALSE))) {
-            bettingState.callKontra();
-        }
-        if (Boolean.parseBoolean(state.getProperty("retour", DEFAULT_FALSE))) {
-            bettingState.callRetour();
-        }
-        if (savedMultiplier != bettingState.multiplier()) {
-            throw new IllegalArgumentException("Saved stake breakdown does not match total multiplier");
-        }
-    }
-
-    private static void restoreKlopfers(GameSession session, Properties state, BettingState bettingState) {
-        String savedKlopfers = state.getProperty("klopferIds", "");
-        if (!savedKlopfers.isEmpty()) {
-            for (String id : savedKlopfers.split(",")) {
-                Player player = session.players.stream().filter(seated -> seated.id().equals(id))
-                        .findFirst().orElseThrow(() -> new IllegalArgumentException("Unknown klopfer: " + id));
-                if (!bettingState.applyDouble(player)) {
-                    throw new IllegalArgumentException("Duplicate klopfer: " + id);
-                }
-            }
-        }
-        int additionalKlopfer = Integer.parseInt(state.getProperty("additionalKlopfer", "0"));
-        for (int index = 0; index < additionalKlopfer; index++) {
-            bettingState.applyDouble();
-        }
-    }
-
-    private static void restoreBiddingState(GameSession session, Properties state) {
+                Integer.parseInt(state.getProperty("vorhand", "0")), false);
         String[] calls = state.getProperty("calls", "").split("\\|", -1);
         for (int seat = 0; seat < Math.min(calls.length, 4); seat++) {
             session.seatCalls[seat] = calls[seat].isEmpty() ? null : calls[seat];
         }
-        session.humanCallPending = Boolean.parseBoolean(state.getProperty("humanCallPending", DEFAULT_FALSE));
-        session.awaitingNoGameChoice = Boolean.parseBoolean(state.getProperty("awaitingNoGameChoice", DEFAULT_FALSE));
-        session.bettingWindowOpen = Boolean.parseBoolean(state.getProperty("bettingWindowOpen", DEFAULT_FALSE));
-        session.bettingWindowHandledCardCount = Integer.parseInt(
-            state.getProperty("bettingWindowHandledCardCount", "-1"));
-        String previousCall = state.getProperty("previousHumanCall", "");
-        session.previousHumanCall = previousCall.isEmpty() ? null : previousCall;
-        String encodedMessages = state.getProperty("bidMessages", "");
-        if (!encodedMessages.isEmpty()) {
-            for (String encoded : encodedMessages.split("\\|")) {
-                String[] parts = encoded.split(";", 2);
-                session.bidMessages.add(new BidMessage(Integer.parseInt(parts[0]), parts[1]));
-            }
-        }
-    }
-
-    private static void restoreGameState(GameSession session, Properties state) {
         session.currentBid = session.decodeContract(state.getProperty("bid", ""));
         String savedMessage = state.getProperty("message", "");
         session.message = savedMessage.isEmpty() ? null : savedMessage;
@@ -387,10 +230,11 @@ public final class GameSession {
             }
             if (session.game.phase() == Phase.FINISHED) {
                 session.stage = Stage.FINISHED;
-            } else if (!session.bettingWindowOpen) {
+            } else {
                 session.advanceBots();
             }
         }
+        return session;
     }
 
     private static String encodeCards(List<Card> cards) {
@@ -476,16 +320,7 @@ public final class GameSession {
                 lastCompletedTrick,
                 stage == Stage.BIDDING ? bidOptions(selectedSoloSuit) : List.of(),
                 completedTricks,
-                java.util.Arrays.asList(seatCalls.clone()),
-                bidMessages,
-                humanCallPending,
-                awaitingNoGameChoice,
-                game.bettingState().breakdown(),
-                bettingWindowOpen,
-                canCallKontra(HUMAN_SEAT),
-                canCallRetour(HUMAN_SEAT),
-                activeContract == null || activeContract.caller() == null
-                    ? -1 : players.indexOf(activeContract.caller()));
+                java.util.Arrays.asList(seatCalls.clone()));
     }
 
     private static TrickSnapshot trickSnapshot(Trick trick) {
@@ -500,32 +335,9 @@ public final class GameSession {
         return HUMAN_SEAT;
     }
 
-    public int stakeMultiplier() {
-        return game.bettingState().multiplier();
-    }
-
-    public BettingState.StakeBreakdown stakeBreakdown() {
-        return game.bettingState().breakdown();
-    }
-
-    public int stockDoubles() {
-        return game.bettingState().stockDoubles();
-    }
-
-    public record SeatOutcome(String name, int eyes, boolean won) {
-    }
-
-    public record Outcome(
-            boolean humanWon,
-            int humanPartyEyes,
-            List<Integer> seatPoints,
-            List<SeatOutcome> seatOutcomes,
-            String contractName,
-            String description
-    ) {
+    public record Outcome(boolean humanWon, int humanPartyEyes, List<Integer> seatPoints, String description) {
         public Outcome {
             seatPoints = List.copyOf(seatPoints);
-            seatOutcomes = List.copyOf(seatOutcomes);
         }
     }
 
@@ -534,7 +346,6 @@ public final class GameSession {
         GameResult result = game.result();
         int perPlayer = new Tariff(SchafkopfConfig.defaults()).calculatePayment(game).totalCentsPerPlayer();
         List<Integer> seatPoints = new ArrayList<>();
-        List<SeatOutcome> seatOutcomes = new ArrayList<>();
         for (Player player : players) {
             boolean callerSide = result.callerTeam().contains(player);
             List<Player> ownSide = callerSide ? result.callerTeam() : result.defenderTeam();
@@ -543,13 +354,11 @@ public final class GameSession {
             // In a 2:2 game every loser pays one winner; a single player settles with each opponent.
             int multiplier = ownSide.size() == otherSide.size() ? 1 : otherSide.size();
             seatPoints.add(perPlayer * multiplier * (won ? 1 : -1));
-            seatOutcomes.add(new SeatOutcome(player.name(), player.totalAugen(), won));
         }
         boolean humanCallerSide = result.callerTeam().contains(human);
         return new Outcome(humanCallerSide == result.callerTeamWon(),
                 humanCallerSide ? result.callerTeamAugen() : result.defenderTeamAugen(),
-                seatPoints, seatOutcomes, game.gameContract().displayName(),
-                new Tariff(SchafkopfConfig.defaults()).calculatePayment(game).description());
+                seatPoints, new Tariff(SchafkopfConfig.defaults()).calculatePayment(game).description());
     }
 
     public SchafkopfGame finishedGame() {
@@ -572,19 +381,13 @@ public final class GameSession {
 
     public Snapshot announce(String optionId, Suit selectedSoloSuit) {
         requireStage(Stage.BIDDING);
-        GameContract candidate = contractFor(optionId);
+        GameContract candidate = contractFor(optionId, selectedSoloSuit);
         if (candidate == null || !biddingRules.canAnnounce(candidate, currentBid)) {
             throw new IllegalArgumentException("That contract cannot overbid the current announcement");
         }
-        String call = currentBid == null ? CALL_PLAY : CALL_AGREE;
-        if (!humanCallPending) {
-            seatCalls[HUMAN_SEAT] = call;
-            bidMessages.add(new BidMessage(HUMAN_SEAT, call));
-        }
-        humanCallPending = false;
-        previousHumanCall = null;
+        String call = currentBid == null ? "Spiele!" : "Auch!!";
         currentBid = candidate;
-        bidMessages.add(new BidMessage(HUMAN_SEAT, contractLabel(candidate)));
+        seatCalls[HUMAN_SEAT] = call;
         runBotBidding(false);
         message = currentBid == candidate
             ? "Du sagst " + call
@@ -593,79 +396,16 @@ public final class GameSession {
         return snapshot(selectedSoloSuit);
     }
 
-    public Snapshot prepareHumanPlay(Suit selectedSoloSuit) {
-        requireStage(Stage.BIDDING);
-        if (!humanCallPending) {
-            previousHumanCall = seatCalls[HUMAN_SEAT];
-            String call = currentBid == null ? CALL_PLAY : CALL_AGREE;
-            seatCalls[HUMAN_SEAT] = call;
-            bidMessages.add(new BidMessage(HUMAN_SEAT, call));
-            humanCallPending = true;
-        }
-        return snapshot(selectedSoloSuit);
-    }
-
-    public Snapshot cancelHumanPlay(Suit selectedSoloSuit) {
-        requireStage(Stage.BIDDING);
-        if (humanCallPending) {
-            BidMessage pendingMessage = bidMessages.get(bidMessages.size() - 1);
-            if (pendingMessage.seat() == HUMAN_SEAT
-                    && (pendingMessage.text().equals(CALL_PLAY) || pendingMessage.text().equals(CALL_AGREE))) {
-                bidMessages.remove(bidMessages.size() - 1);
-            }
-            seatCalls[HUMAN_SEAT] = previousHumanCall;
-            previousHumanCall = null;
-            humanCallPending = false;
-        }
-        return snapshot(selectedSoloSuit);
-    }
-
     public Snapshot pass(Suit selectedSoloSuit) {
         requireStage(Stage.BIDDING);
-        if (humanCallPending) {
-            bidMessages.remove(bidMessages.size() - 1);
-            humanCallPending = false;
-            previousHumanCall = null;
-        }
-        seatCalls[HUMAN_SEAT] = CALL_PASS;
-        bidMessages.add(new BidMessage(HUMAN_SEAT, CALL_PASS));
+        seatCalls[HUMAN_SEAT] = "Weiter";
         runBotBidding(false);
-        if (currentBid == null) {
-            awaitingNoGameChoice = true;
-            message = "Alle sagen weiter. Bitte die Regel für ‚Keiner spielt‘ wählen.";
-            return snapshot(selectedSoloSuit);
-        }
-        message = contractLabel(currentBid) + " von " + currentBid.caller().name() + " wird gespielt.";
-        GameContract selected = currentBid;
+        GameContract selected = currentBid == null ? new RamschContract() : currentBid;
+        message = currentBid == null
+                ? "Alle sagen weiter. Es wird Ramsch gespielt."
+                : contractLabel(currentBid) + " von " + currentBid.caller().name() + " wird gespielt.";
         startGame(selected);
         return snapshot(selectedSoloSuit);
-    }
-
-    public NoGameSelectionResult selectNoGamePolicy(SchafkopfConfig.NoGamePolicy policy) {
-        requireStage(Stage.BIDDING);
-        if (!awaitingNoGameChoice) {
-            throw new IllegalStateException("No no-game policy is currently requested");
-        }
-        if (policy == SchafkopfConfig.NoGamePolicy.STOCK) {
-            if (game.bettingState().stockDoubles() == 5) {
-                awaitingNoGameChoice = false;
-                message = "Max. Stock erreicht!";
-                return NoGameSelectionResult.STOCK_MAXED;
-            }
-            game.bettingState().applyStock(2);
-            awaitingNoGameChoice = false;
-            if (game.bettingState().stockDoubles() == 5) {
-                message = "Max. Stock erreicht!";
-                return NoGameSelectionResult.STOCK_MAXED;
-            }
-            return NoGameSelectionResult.STOCK_ADDED;
-        }
-        if (policy == SchafkopfConfig.NoGamePolicy.ZAMMWERFEN) {
-            awaitingNoGameChoice = false;
-            message = "Zusammengeworfen. Es wird neu gegeben.";
-            return NoGameSelectionResult.ZAMMWERFEN;
-        }
-        return NoGameSelectionResult.NOT_IMPLEMENTED;
     }
 
     public Snapshot playHumanCard(Card card, Suit selectedSoloSuit) {
@@ -673,56 +413,9 @@ public final class GameSession {
         if (!human.equals(game.currentPlayer())) {
             throw new IllegalStateException("It is not the human player's turn");
         }
-        if (bettingWindowOpen) {
-            bettingWindowHandledCardCount = game.currentTrickCards().size();
-            bettingWindowOpen = false;
-        }
         game.playCard(card);
         advanceBots();
         return snapshot(selectedSoloSuit);
-    }
-
-    public Snapshot continueAfterBettingWindow(Suit selectedSoloSuit) {
-        requireStage(Stage.TRICK_PLAY);
-        if (bettingWindowOpen) {
-            bettingWindowHandledCardCount = game.currentTrickCards().size();
-            bettingWindowOpen = false;
-        }
-        advanceBots();
-        return snapshot(selectedSoloSuit);
-    }
-
-    public boolean canCallKontra(int seat) {
-        if (!isBettingWindowOpen() || game.currentTrickCards().size() >= 2
-            || seat < 0 || seat >= players.size()) {
-            return false;
-        }
-        return !isCallerSide(players.get(seat)) && game.bettingState().kontraCount() == 0;
-    }
-
-    public boolean callKontra(int seat) {
-        if (!canCallKontra(seat) || !game.bettingState().callKontra()) {
-            return false;
-        }
-        closeBettingWindowAndAdvance();
-        return true;
-    }
-
-    public boolean canCallRetour(int seat) {
-        if (!isBettingWindowOpen() || game.currentTrickCards().size() != 2
-            || !human.equals(game.currentPlayer()) || seat < 0 || seat >= players.size()) {
-            return false;
-        }
-        return isCallerSide(players.get(seat)) && game.bettingState().kontraCount() == 1
-                && game.bettingState().retourCount() == 0;
-    }
-
-    public boolean callRetour(int seat) {
-        if (!canCallRetour(seat) || !game.bettingState().callRetour()) {
-            return false;
-        }
-        closeBettingWindowAndAdvance();
-        return true;
     }
 
     /**
@@ -742,16 +435,13 @@ public final class GameSession {
             GameContract candidate = recommendation == null ? null : recommendation.contract();
             if (candidate != null && biddingRules.supports(candidate.gameType())
                     && biddingRules.canAnnounce(candidate, currentBid)) {
-                String call = currentBid == null ? CALL_PLAY : CALL_AGREE;
+                String call = currentBid == null ? "Spiele!" : "Auch!!";
                 currentBid = candidate;
                 message = player.name() + " sagt " + call;
                 seatCalls[seat] = call;
-                bidMessages.add(new BidMessage(seat, call));
-                bidMessages.add(new BidMessage(seat, contractLabel(candidate)));
             } else {
                 message = player.name() + " sagt weiter.";
-                seatCalls[seat] = CALL_PASS;
-                bidMessages.add(new BidMessage(seat, CALL_PASS));
+                seatCalls[seat] = "Weiter";
             }
         }
     }
@@ -764,37 +454,33 @@ public final class GameSession {
         addBidOption(options, "SOLO_" + soloSuit.name(), "Solo · " + suitLabel(soloSuit),
                 new SoloContract(human, soloSuit));
         addBidOption(options, "WENZ", "Wenz", new WenzContract(human));
-        addBidOption(options, FARBWENZ_OPTION_PREFIX + soloSuit.name(), "Farbwenz · " + suitLabel(soloSuit),
+        addBidOption(options, "FARBWENZ_" + soloSuit.name(), "Farbwenz · " + suitLabel(soloSuit),
             new WenzContract(human, soloSuit));
         List<Suit> validCalledSuits = rufspielAdvisor.getValidRufspielSuits(human);
         if (validCalledSuits.isEmpty()) {
-            options.add(new BidOption("SAUSPIEL", "Sauspiel", false, true));
+            options.add(new BidOption("SAUSPIEL", "Sauspiel", false));
         } else {
             for (Suit suit : validCalledSuits) {
                 GameContract contract = new RufspielContract(human, suit);
-                options.add(new BidOption(SAUSPIEL_OPTION_PREFIX + suit.name(), "Sauspiel · " + suitLabel(suit),
-                        biddingRules.canAnnounce(contract, currentBid), true));
+                options.add(new BidOption("SAUSPIEL_" + suit.name(), "Sauspiel · " + suitLabel(suit),
+                        biddingRules.canAnnounce(contract, currentBid)));
             }
         }
-        options.add(new BidOption("GEIER", "Geier", true, false));
-        options.add(new BidOption("BETTEL", "Bettel", true, false));
-        options.add(new BidOption("RAMSCH", "Ramsch", true, false));
-        options.add(new BidOption("KREUZBOCK", "Kreuzbock", true, false));
         return List.copyOf(options);
     }
 
     private void addBidOption(List<BidOption> options, String id, String label, GameContract contract) {
-        options.add(new BidOption(id, label, biddingRules.canAnnounce(contract, currentBid), true));
+        options.add(new BidOption(id, label, biddingRules.canAnnounce(contract, currentBid)));
     }
 
-    private GameContract contractFor(String optionId) {
-        if (optionId.startsWith(SAUSPIEL_OPTION_PREFIX)) {
-            Suit calledSuit = Suit.valueOf(optionId.substring(SAUSPIEL_OPTION_PREFIX.length()));
+    private GameContract contractFor(String optionId, Suit soloSuit) {
+        if (optionId.startsWith("SAUSPIEL_")) {
+            Suit calledSuit = Suit.valueOf(optionId.substring("SAUSPIEL_".length()));
             return rufspielAdvisor.getValidRufspielSuits(human).contains(calledSuit)
                     ? new RufspielContract(human, calledSuit) : null;
         }
-        if (optionId.startsWith(FARBWENZ_OPTION_PREFIX)) {
-            return new WenzContract(human, Suit.valueOf(optionId.substring(FARBWENZ_OPTION_PREFIX.length())));
+        if (optionId.startsWith("FARBWENZ_")) {
+            return new WenzContract(human, Suit.valueOf(optionId.substring("FARBWENZ_".length())));
         }
         return switch (optionId) {
             case "SOLO_" + "EICHEL", "SOLO_" + "GRAS", "SOLO_" + "HERZ", "SOLO_" + "SCHELLEN" ->
@@ -811,51 +497,17 @@ public final class GameSession {
         game.setupContract(contract);
         game.startTrickPlay(players.get(vorhandSeat));
         stage = Stage.TRICK_PLAY;
-        bettingWindowOpen = true;
-        bettingWindowHandledCardCount = -1;
+        advanceBots();
     }
 
     private void advanceBots() {
-        while (game.phase() == Phase.TRICK_PLAY) {
-            int playedCards = game.currentTrickCards().size();
-            if (game.currentTrickNumber() == 1 && playedCards < 2
-                    && bettingWindowHandledCardCount != playedCards) {
-                bettingWindowOpen = true;
-                return;
-            }
-            if (human.equals(game.currentPlayer())) {
-                break;
-            }
+        while (game.phase() == Phase.TRICK_PLAY && !human.equals(game.currentPlayer())) {
             game.playBotTurn();
         }
         if (game.phase() == Phase.FINISHED) {
             stage = Stage.FINISHED;
             message = "Spiel beendet.";
-        } else if (stage == Stage.TRICK_PLAY && game.currentTrickNumber() == 1
-                && game.currentTrickCards().size() == 2
-                && bettingWindowHandledCardCount != 2) {
-            bettingWindowOpen = true;
-            if (!canCallRetour(HUMAN_SEAT)) {
-                bettingWindowOpen = false;
-            }
         }
-    }
-
-    private boolean isBettingWindowOpen() {
-        return stage == Stage.TRICK_PLAY && bettingWindowOpen && game.currentTrickNumber() == 1
-            && game.currentTrickCards().size() <= 2;
-    }
-
-    private boolean isCallerSide(Player player) {
-        GameContract contract = game.gameContract();
-        return contract != null && (contract.caller() != null && contract.caller().equals(player) || game.partner() != null
-                && game.partner().equals(player));
-    }
-
-    private void closeBettingWindowAndAdvance() {
-        bettingWindowHandledCardCount = game.currentTrickCards().size();
-        bettingWindowOpen = false;
-        advanceBots();
     }
 
     private void requireStage(Stage expected) {

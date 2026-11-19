@@ -7,8 +7,23 @@ public record LearningJournalEntry(
         String id,
         long createdAtMillis,
         String gameRecordText,
-        List<PostGameAnalyzer.LearningProposal> proposals
+    List<Proposal> proposals
 ) {
+    public record Proposal(
+        int seat,
+        String playerName,
+        int playIndex,
+        int trickNumber,
+        schafkopf.model.Card played,
+        schafkopf.model.Card suggested,
+        double playedWinRate,
+        double suggestedWinRate,
+        double playedMeanEyes,
+        double suggestedMeanEyes,
+        int samples
+    ) {
+    }
+
     public LearningJournalEntry {
         if (id == null || id.isBlank() || createdAtMillis < 0 || gameRecordText == null || gameRecordText.isBlank()) {
             throw new IllegalArgumentException("Learning journal entries need an id, timestamp, and game record");

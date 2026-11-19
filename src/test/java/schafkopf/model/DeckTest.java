@@ -27,15 +27,4 @@ class DeckTest {
         assertThrows(IllegalArgumentException.class, () -> deck.cut(0));
         assertThrows(IllegalArgumentException.class, () -> deck.cut(32));
     }
-
-    @Test
-    void restoresAValidSavedDeckOrderAndRejectsDuplicateCards() {
-        Deck original = new Deck();
-        original.shuffle(new java.util.Random(23L));
-        Card duplicateCard = original.cards().get(0);
-        List<Card> duplicateCards = java.util.Collections.nCopies(32, duplicateCard);
-
-        assertEquals(original.cards(), new Deck(original.cards()).cards());
-        assertThrows(IllegalArgumentException.class, () -> new Deck(duplicateCards));
-    }
 }

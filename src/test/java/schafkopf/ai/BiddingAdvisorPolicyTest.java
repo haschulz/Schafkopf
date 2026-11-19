@@ -33,6 +33,19 @@ class BiddingAdvisorPolicyTest {
     }
 
     @Test
+    void klopfenWithTwoObersOneUnterAndEichelSauAmongFirstFourIsYes() {
+        Player player = new Player("1", "Sepp");
+        List<Card> firstFour = List.of(
+                new Card(Suit.EICHEL, Rank.OBER),
+                new Card(Suit.GRAS, Rank.OBER),
+                new Card(Suit.HERZ, Rank.UNTER),
+                new Card(Suit.EICHEL, Rank.SAU));
+
+        assertTrue(new BiddingAdvisor(rules, PolicyGenome.baseline())
+                .shouldKlopfen(player, firstFour, rules));
+    }
+
+    @Test
     void rufspielBidRespondsToGenomeHandStrengthWeight() {
         Player player = new Player("1", "Sepp");
         player.setHand(List.of(
