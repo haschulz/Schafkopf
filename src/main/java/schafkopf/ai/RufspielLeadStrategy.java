@@ -116,6 +116,11 @@ public class RufspielLeadStrategy {
         Card highestTrump = trumps.stream()
                 .max(Comparator.comparingInt(rules::getTrumpStrength))
                 .orElse(null);
+        if (context.isPartner() && highestTrump != null) {
+            return Optional.of(new MoveExplanation(context.player(), highestTrump, context.ruleRequirement(),
+                    "Zeigt dem Rufer den höchsten eigenen Trumpf: " + highestTrump.shortName()
+                            + "; Signalkonvention, keine Garantie über fremde Hände", true));
+        }
         if (useMemoryEngine && highestTrump != null && context.memory().isHighestRemainingTrump(highestTrump)) {
             return Optional.of(new MoveExplanation(
                     context.player(),
@@ -252,13 +257,14 @@ public class RufspielLeadStrategy {
     private Optional<MoveExplanation> chooseOwnSauLead(LeadContext context) {
         return context.legalMoves().stream()
                 .filter(card -> !rules.isTrump(card) && card.rank() == Rank.SAU)
-                .findFirst()
+                .min(Comparator.comparingLong(card -> context.player().hand().stream()
+                        .filter(held -> held.suit() == card.suit() && !rules.isTrump(held)).count()))
                 .map(card -> new MoveExplanation(
                         context.player(),
                         card,
                         context.ruleRequirement(),
                         "Spielt eigene Farbsau von vorn an (" + card.shortName()
-                                + "), um sichere 11 Augen einzufahren",
+                                + "), kurze Farbe als Heuristik; Abstich bleibt möglich",
                         true));
     }
 
@@ -269,7 +275,8 @@ public class RufspielLeadStrategy {
 
         return context.legalMoves().stream()
                 .filter(card -> !rules.isTrump(card))
-                .min(Comparator.comparingInt(Card::points))
+                .min(Comparator.comparingLong((Card card) -> leadLengthPreference(context, card))
+                        .thenComparingInt(Card::points))
                 .map(card -> new MoveExplanation(
                         context.player(),
                         card,
@@ -289,6 +296,12 @@ public class RufspielLeadStrategy {
                 "Eröffnet mit kleiner Karte " + lowest.shortName(),
                 true);
     }
+
+        private long leadLengthPreference(LeadContext context, Card card) {
+                long length = context.player().hand().stream()
+                                .filter(held -> held.suit() == card.suit() && !rules.isTrump(held)).count();
+                return context.memory().distanceAfter(context.player(), context.contract().caller()) == 1 ? -length : length;
+        }
 
     private boolean isTeammate(
             Player p1,

@@ -21,11 +21,34 @@ import java.util.Map;
 import java.util.function.Consumer;
 
 public class SimpleBot {
+    private static final String DEFENDER_ROLE = "DEFENDER";
     private record DecisionContext(GameMemory memory, List<Player> remainingPlayers, boolean complete) {
     }
 
     private record FollowContext(PlayedCard currentBest, DecisionContext decision) {
     }
+
+        public MoveExplanation chooseFromPublicInformation(
+            Player player, Trick trick, RufspielContract contract, boolean calledSauPlayedBefore,
+            int currentTrickNumber, GameMemory memory, List<Player> remainingPlayers
+        ) {
+        Player knownPartner = player.hasCard(contract.calledSau()) ? player : memory.confirmedPartner();
+        if (knownPartner != null) {
+            return chooseMove(player, trick, contract, knownPartner, calledSauPlayedBefore,
+                currentTrickNumber, memory, remainingPlayers);
+        }
+        List<Card> legalMoves = rules.getLegalMoves(player, trick, contract,
+            calledSauPlayedBefore, currentTrickNumber);
+        String requirement = rules.explainRuleRequirement(player, trick, contract,
+            calledSauPlayedBefore, currentTrickNumber);
+        MoveExplanation recommendation = trick.playedCards().isEmpty()
+            ? leadStrategy.chooseLeadMove(player, legalMoves, contract, null,
+                calledSauPlayedBefore, requirement, memory)
+            : chooseGenericMove(player, trick, contract, List.of(player), legalMoves,
+                memory, remainingPlayers);
+        String role = player.equals(contract.caller()) ? "RUFSPIEL_CALLER" : DEFENDER_ROLE;
+        return rankLegalMoves(player, trick, contract, List.of(player), legalMoves, recommendation, role);
+        }
 
     private final RuleEngine rules;
     private final boolean useMemoryEngine;
@@ -140,7 +163,11 @@ public class SimpleBot {
         MoveExplanation recommendation = decideRufspielMove(player, trick, contract, partner,
             calledSauPlayedBefore, currentTrickNumber, context);
         List<Card> legalMoves = rules.getLegalMoves(player, trick, contract, calledSauPlayedBefore, currentTrickNumber);
-        return rankLegalMoves(player, trick, contract, List.of(contract.caller(), partner), legalMoves,
+        List<Player> callerTeam = List.of(contract.caller(), partner);
+        List<Player> ownTeam = callerTeam.contains(player) ? callerTeam
+            : context.memory().possibleOpponentsOf(contract.caller()).stream()
+                .filter(member -> !member.equals(partner)).toList();
+        return rankLegalMoves(player, trick, contract, ownTeam, legalMoves,
             recommendation, null);
         }
 
@@ -180,9 +207,24 @@ public class SimpleBot {
             int currentTrickNumber,
             String roleOverride
         ) {
+            return chooseMove(player, trick, contract, ownTeam, currentTrickNumber,
+                    roleOverride, null, List.of());
+        }
+
+        @SuppressWarnings("java:S107")
+        public MoveExplanation chooseMove(
+            Player player,
+            Trick trick,
+            GameContract contract,
+            List<Player> ownTeam,
+            int currentTrickNumber,
+            String roleOverride,
+            GameMemory memory,
+            List<Player> remainingPlayers
+        ) {
             List<Card> legalMoves = rules.getLegalMovesForContract(player, trick, contract, false, currentTrickNumber);
             MoveExplanation recommendation = chooseGenericMove(
-                player, trick, contract, ownTeam, legalMoves);
+                player, trick, contract, ownTeam, legalMoves, memory, remainingPlayers);
             return rankLegalMoves(player, trick, contract, ownTeam, legalMoves, recommendation, roleOverride);
             }
 
@@ -191,7 +233,9 @@ public class SimpleBot {
                 Trick trick,
                 GameContract contract,
                 List<Player> ownTeam,
-                List<Card> legalMoves
+                List<Card> legalMoves,
+                GameMemory memory,
+                List<Player> remainingPlayers
             ) {
         String requirement = rules.explainRuleRequirement(player, trick, contract);
         if (legalMoves.size() == 1) {
@@ -199,7 +243,7 @@ public class SimpleBot {
         }
 
         if (trick.playedCards().isEmpty()) {
-            return chooseGenericLead(player, legalMoves, contract, requirement);
+            return chooseGenericLead(player, legalMoves, contract, requirement, memory);
         }
 
         PlayedCard currentBest = rules.evaluateTrickWinner(trick, contract);
@@ -213,6 +257,16 @@ public class SimpleBot {
         }
         if (contract.gameType() == GameType.RAMSCH) {
             return chooseRamschFollow(player, trick, legalMoves, winningMoves, currentBest, contract, requirement);
+        }
+        List<Player> remainingOpponents = remainingPlayers.stream()
+            .filter(remaining -> !ownTeam.contains(remaining)).toList();
+        if (teammateWinning && memory != null
+            && memory.isUnbeatableAgainst(currentBest.card(), player, remainingOpponents)) {
+            Card smear = legalMoves.stream().max(Comparator.comparingInt(Card::points)
+                .thenComparingInt(card -> -sideSuitLength(player, card, contract)))
+                .orElseThrow();
+            return new MoveExplanation(player, smear, requirement,
+                "Schmiert auf nachweislich sicheren Partnerstich: " + smear.shortName(), true);
         }
         if (teammateWinning || winningMoves.isEmpty()) {
             Card discard = legalMoves.stream()
@@ -232,6 +286,11 @@ public class SimpleBot {
                 .orElseThrow();
         return new MoveExplanation(player, cheapestWinner, requirement,
                 "Übernimmt den Stich mit der günstigsten Gewinnkarte " + cheapestWinner.shortName(), true);
+    }
+
+    private int sideSuitLength(Player player, Card card, GameContract contract) {
+        return (int) player.hand().stream()
+                .filter(held -> held.suit() == card.suit() && !contract.isTrump(held, rules)).count();
     }
 
         private MoveExplanation rankLegalMoves(
@@ -313,7 +372,7 @@ public class SimpleBot {
             if (player.equals(contract.caller())) {
                 return "RUFSPIEL_CALLER";
             }
-            return ownTeam.contains(player) ? "RUFSPIEL_PARTNER" : "DEFENDER";
+            return ownTeam.contains(player) ? "RUFSPIEL_PARTNER" : DEFENDER_ROLE;
         }
         if (contract.gameType() == GameType.RAMSCH) {
             return "RAMSCH_PLAYER";
@@ -321,7 +380,7 @@ public class SimpleBot {
         if (contract.gameType() == GameType.KREUZBOCK) {
             return "KREUZBOCK_TEAM";
         }
-        return player.equals(contract.caller()) ? "SOLOIST" : "DEFENDER";
+        return player.equals(contract.caller()) ? "SOLOIST" : DEFENDER_ROLE;
     }
 
     private String summarizeContributions(Map<String, Double> contributions) {
@@ -386,7 +445,8 @@ public class SimpleBot {
             Player player,
             List<Card> legalMoves,
             GameContract contract,
-            String requirement
+            String requirement,
+            GameMemory memory
     ) {
         if (contract.gameType() != GameType.BETTEL && player.equals(contract.caller())) {
             Card highestTrump = legalMoves.stream()
@@ -394,6 +454,9 @@ public class SimpleBot {
                     .max(Comparator.comparingInt(contract::getTrumpStrength))
                     .orElse(null);
             if (highestTrump != null) {
+                if (memory != null && contract.gameType() == GameType.FARBSOLO) {
+                    return chooseControlledTrumpLead(player, legalMoves, contract, requirement, memory, highestTrump);
+                }
                 return new MoveExplanation(player, highestTrump, requirement,
                         "Soloist zieht den höchsten Trumpf " + highestTrump.shortName(), true);
             }
@@ -405,7 +468,8 @@ public class SimpleBot {
         }) {
             Card sideSuitLead = legalMoves.stream()
                     .filter(card -> !contract.isTrump(card, rules))
-                    .min(Comparator.comparingInt(Card::points).thenComparingInt(contract::getSuitStrength))
+                    .min(Comparator.comparingInt((Card card) -> leadLengthPreference(player, card, contract, memory))
+                        .thenComparingInt(Card::points).thenComparingInt(contract::getSuitStrength))
                     .orElse(null);
             if (sideSuitLead != null) {
                 return new MoveExplanation(player, sideSuitLead, requirement,
@@ -420,6 +484,30 @@ public class SimpleBot {
         return new MoveExplanation(player, lowest, requirement,
                 "Eröffnet mit kleiner Karte " + lowest.shortName(), true);
     }
+
+    private int leadLengthPreference(Player player, Card card, GameContract contract, GameMemory memory) {
+        if (memory == null) {
+            return 0;
+        }
+        int length = sideSuitLength(player, card, contract);
+        return memory.distanceAfter(player, contract.caller()) == 1 ? -length : length;
+    }
+
+        private MoveExplanation chooseControlledTrumpLead(
+            Player player, List<Card> legalMoves, GameContract contract,
+            String requirement, GameMemory memory, Card highestTrump
+        ) {
+        Card concealedWinner = legalMoves.stream()
+            .filter(card -> contract.isTrump(card, rules))
+            .filter(card -> memory.isUnbeatableAgainst(card, player, memory.possibleOpponentsOf(player)))
+            .min(Comparator.comparingInt(contract::getTrumpStrength))
+            .orElse(highestTrump);
+        String reasoning = concealedWinner.equals(highestTrump)
+            ? "Soloist zieht den höchsten Trumpf " + highestTrump.shortName()
+            : "Untertreibt mit sicherem Trumpf aus eigener Kartenkenntnis: "
+                + concealedWinner.shortName() + "; gegnerisches Schmieren bleibt unsicher";
+        return new MoveExplanation(player, concealedWinner, requirement, reasoning, true);
+        }
 
     private MoveExplanation chooseBettelFollow(
             Player player,
@@ -510,8 +598,9 @@ public class SimpleBot {
 
             GameMemory memory = context.decision().memory();
             List<Player> remainingPlayers = context.decision().remainingPlayers();
-            boolean isTrickSafe = memory.isTrickSafeAgainstRemainingPlayers(
-                trick, currentBest, remainingPlayers, contract, partner);
+                boolean isTrickSafe = memory.isUnbeatableAgainst(currentBest.card(), player,
+                    remainingPlayers.stream().filter(remaining ->
+                        !isTeammate(player, remaining, contract, partner)).toList());
             boolean acuteRuffDanger = memory.acuteRuffDangerFromRemainingOpponents(
                 trick, remainingPlayers, contract, partner);
             if (isTrickSafe) {

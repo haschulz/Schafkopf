@@ -9,12 +9,10 @@ import schafkopf.config.SchafkopfConfig;
 import schafkopf.economy.Tariff;
 import schafkopf.model.BettelContract;
 import schafkopf.model.Card;
-import schafkopf.model.Deck;
 import schafkopf.model.GameContract;
 import schafkopf.model.GameType;
 import schafkopf.model.GeierContract;
 import schafkopf.model.KreuzbockContract;
-import schafkopf.model.Personality;
 import schafkopf.model.PlayedCard;
 import schafkopf.model.Player;
 import schafkopf.model.RamschContract;
@@ -89,8 +87,8 @@ public final class GameSession {
     }
 
     private static final int HUMAN_SEAT = 3;
-    private static final List<Personality> BOT_PERSONALITIES = List.of(
-            Personality.MAURER, Personality.SOLIDE, Personality.ZOCKER);
+    private static final String SAUSPIEL_PREFIX = "SAUSPIEL_";
+    private static final String FARBWENZ_PREFIX = "FARBWENZ_";
     private static final Set<GameType> SUPPORTED_BID_TYPES = Set.of(
             GameType.RUFSPIEL, GameType.FARBWENZ, GameType.FARBSOLO, GameType.WENZ);
 
@@ -141,6 +139,7 @@ public final class GameSession {
         game = new SchafkopfGame(players, rules, bot, SchafkopfConfig.defaults());
         game.setLogger(ignored -> { });
         game.setCustomHands(hands);
+        game.enableDecisionAnalysis(8);
         biddingAdvisor = new GameBiddingAdvisor(
                 rules, genome, ignored -> { }, ContractValueModel.empty());
         rufspielAdvisor = new BiddingAdvisor(rules, genome, ignored -> { }, ContractValueModel.empty());
@@ -381,7 +380,7 @@ public final class GameSession {
 
     public Snapshot announce(String optionId, Suit selectedSoloSuit) {
         requireStage(Stage.BIDDING);
-        GameContract candidate = contractFor(optionId, selectedSoloSuit);
+        GameContract candidate = contractFor(optionId);
         if (candidate == null || !biddingRules.canAnnounce(candidate, currentBid)) {
             throw new IllegalArgumentException("That contract cannot overbid the current announcement");
         }
@@ -430,8 +429,10 @@ public final class GameSession {
             }
             int seat = (vorhandSeat + position) % 4;
             Player player = players.get(seat);
-            GameBiddingAdvisor.ContractRecommendation recommendation = biddingAdvisor.recommend(
-                    player, BOT_PERSONALITIES.get(seat), SUPPORTED_BID_TYPES);
+                var information = new schafkopf.ai.DecisionInformation(players.stream().map(Player::name).toList(),
+                    seat, player.hand(), List.of(), null, vorhandSeat, game.config(), game.bettingState().multiplier());
+                GameBiddingAdvisor.ContractRecommendation recommendation = biddingAdvisor.recommendWithAnalysis(
+                    player, SUPPORTED_BID_TYPES, information, currentBid, 8);
             GameContract candidate = recommendation == null ? null : recommendation.contract();
             if (candidate != null && biddingRules.supports(candidate.gameType())
                     && biddingRules.canAnnounce(candidate, currentBid)) {
@@ -454,7 +455,7 @@ public final class GameSession {
         addBidOption(options, "SOLO_" + soloSuit.name(), "Solo · " + suitLabel(soloSuit),
                 new SoloContract(human, soloSuit));
         addBidOption(options, "WENZ", "Wenz", new WenzContract(human));
-        addBidOption(options, "FARBWENZ_" + soloSuit.name(), "Farbwenz · " + suitLabel(soloSuit),
+        addBidOption(options, FARBWENZ_PREFIX + soloSuit.name(), "Farbwenz · " + suitLabel(soloSuit),
             new WenzContract(human, soloSuit));
         List<Suit> validCalledSuits = rufspielAdvisor.getValidRufspielSuits(human);
         if (validCalledSuits.isEmpty()) {
@@ -462,7 +463,7 @@ public final class GameSession {
         } else {
             for (Suit suit : validCalledSuits) {
                 GameContract contract = new RufspielContract(human, suit);
-                options.add(new BidOption("SAUSPIEL_" + suit.name(), "Sauspiel · " + suitLabel(suit),
+                options.add(new BidOption(SAUSPIEL_PREFIX + suit.name(), "Sauspiel · " + suitLabel(suit),
                         biddingRules.canAnnounce(contract, currentBid)));
             }
         }
@@ -473,14 +474,14 @@ public final class GameSession {
         options.add(new BidOption(id, label, biddingRules.canAnnounce(contract, currentBid)));
     }
 
-    private GameContract contractFor(String optionId, Suit soloSuit) {
-        if (optionId.startsWith("SAUSPIEL_")) {
-            Suit calledSuit = Suit.valueOf(optionId.substring("SAUSPIEL_".length()));
+    private GameContract contractFor(String optionId) {
+        if (optionId.startsWith(SAUSPIEL_PREFIX)) {
+            Suit calledSuit = Suit.valueOf(optionId.substring(SAUSPIEL_PREFIX.length()));
             return rufspielAdvisor.getValidRufspielSuits(human).contains(calledSuit)
                     ? new RufspielContract(human, calledSuit) : null;
         }
-        if (optionId.startsWith("FARBWENZ_")) {
-            return new WenzContract(human, Suit.valueOf(optionId.substring("FARBWENZ_".length())));
+        if (optionId.startsWith(FARBWENZ_PREFIX)) {
+            return new WenzContract(human, Suit.valueOf(optionId.substring(FARBWENZ_PREFIX.length())));
         }
         return switch (optionId) {
             case "SOLO_" + "EICHEL", "SOLO_" + "GRAS", "SOLO_" + "HERZ", "SOLO_" + "SCHELLEN" ->

@@ -11,6 +11,7 @@ import schafkopf.rules.RuleEngine;
  */
 public enum SuitCategory {
     TRUMP("Trumpf"),
+    HERZ("Herz"),
     EICHEL("Eichel"),
     GRAS("Gras"),
     SCHELLEN("Schellen");
@@ -44,6 +45,10 @@ public enum SuitCategory {
             case SCHELLEN -> SCHELLEN;
             case HERZ -> TRUMP;
         };
+    }
+
+    public static SuitCategory fromCard(Card card, GameContract contract, RuleEngine rules) {
+        return contract.isTrump(card, rules) ? TRUMP : valueOf(card.suit().name());
     }
 }
 

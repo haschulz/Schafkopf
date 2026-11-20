@@ -1,6 +1,7 @@
 package schafkopf.ai;
 
 import schafkopf.model.Card;
+import schafkopf.model.GameContract;
 import schafkopf.model.PlayedCard;
 import schafkopf.model.Player;
 import schafkopf.model.Rank;
@@ -12,6 +13,7 @@ import schafkopf.rules.RuleEngine;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -37,28 +39,28 @@ public class GameMemory {
 
     private boolean calledSauPlayed = false;
     private Player confirmedPartner = null;
-
-    // Standard trump hierarchy from highest to lowest (14 trumps)
-    private static final List<Card> ALL_TRUMPS_ORDERED = List.of(
-            new Card(Suit.EICHEL, Rank.OBER),
-            new Card(Suit.GRAS, Rank.OBER),
-            new Card(Suit.HERZ, Rank.OBER),
-            new Card(Suit.SCHELLEN, Rank.OBER),
-            new Card(Suit.EICHEL, Rank.UNTER),
-            new Card(Suit.GRAS, Rank.UNTER),
-            new Card(Suit.HERZ, Rank.UNTER),
-            new Card(Suit.SCHELLEN, Rank.UNTER),
-            new Card(Suit.HERZ, Rank.SAU),
-            new Card(Suit.HERZ, Rank.ZEHN),
-            new Card(Suit.HERZ, Rank.KOENIG),
-            new Card(Suit.HERZ, Rank.NEUN),
-            new Card(Suit.HERZ, Rank.ACHT),
-            new Card(Suit.HERZ, Rank.SIEBEN)
-    );
+    private final GameContract activeContract;
+    private final List<Card> trumpsOrdered;
 
     public GameMemory(List<Player> players, RuleEngine rules) {
+        this(players, rules, null);
+    }
+
+    public GameMemory(List<Player> players, RuleEngine rules, GameContract contract) {
         this.players = players;
         this.rules = rules;
+        this.activeContract = contract;
+        List<Card> trumps = new ArrayList<>();
+        for (Suit suit : Suit.values()) {
+            for (Rank rank : Rank.values()) {
+                Card card = new Card(suit, rank);
+                if (isTrump(card)) {
+                    trumps.add(card);
+                }
+            }
+        }
+        trumps.sort(Comparator.comparingInt(this::trumpStrength).reversed());
+        this.trumpsOrdered = List.copyOf(trumps);
         for (Player p : players) {
             definiteVoids.put(p.id(), EnumSet.noneOf(SuitCategory.class));
             playerPoints.put(p.id(), 0);
@@ -69,21 +71,21 @@ public class GameMemory {
      * Records a card played into an active trick.
      * Evaluates Bedienpflicht violations to deduce 100% definite voids (Farbfreiheit).
      */
-    public void recordCardPlayed(Player player, Card card, Trick trick, RufspielContract contract) {
+    public void recordCardPlayed(Player player, Card card, Trick trick, GameContract contract) {
         playedCards.add(card);
 
-        if (card.equals(contract.calledSau())) {
+        if (contract instanceof RufspielContract rufspiel && card.equals(rufspiel.calledSau())) {
             calledSauPlayed = true;
             confirmedPartner = player;
             observationLogs.add(String.format("Aufdeckung: %s spielt die gesuchte %s-Sau und ist damit der Mitspieler!",
-                    player.name(), contract.calledSuit().displayName()));
+                    player.name(), rufspiel.calledSuit().displayName()));
         }
 
         // If this is not the lead card, check if player followed the led suit category
         if (!trick.playedCards().isEmpty()) {
             Card leadCard = trick.leadCard();
-            SuitCategory leadCat = SuitCategory.fromCard(leadCard, rules);
-            SuitCategory playedCat = SuitCategory.fromCard(card, rules);
+            SuitCategory leadCat = SuitCategory.fromCard(leadCard, contract, rules);
+            SuitCategory playedCat = SuitCategory.fromCard(card, contract, rules);
 
             if (leadCat != playedCat) {
                 // Player was unable to follow -> DEFINITIV VOID in leadCat!
@@ -118,6 +120,14 @@ public class GameMemory {
         return playedCards.contains(card);
     }
 
+    public List<Player> possibleOpponentsOf(Player observer) {
+        return players.stream().filter(player -> !player.equals(observer)).toList();
+    }
+
+    public int distanceAfter(Player observer, Player other) {
+        return Math.floorMod(players.indexOf(other) - players.indexOf(observer), players.size());
+    }
+
     public Set<Card> allPlayedCards() {
         return Collections.unmodifiableSet(playedCards);
     }
@@ -131,7 +141,11 @@ public class GameMemory {
         if (playedCards.contains(card)) {
             return Collections.emptyList();
         }
-        SuitCategory cat = SuitCategory.fromCard(card, rules);
+        if (observer.hasCard(card)) {
+            return List.of(observer);
+        }
+        SuitCategory cat = activeContract == null ? SuitCategory.fromCard(card, rules)
+            : SuitCategory.fromCard(card, activeContract, rules);
         List<Player> candidates = new ArrayList<>();
         for (Player p : players) {
             if (p.equals(observer)) continue;
@@ -146,7 +160,7 @@ public class GameMemory {
      * Returns the highest trump card in the entire game that has not yet been played.
      */
     public Card getHighestRemainingTrump() {
-        for (Card trump : ALL_TRUMPS_ORDERED) {
+        for (Card trump : trumpsOrdered) {
             if (!playedCards.contains(trump)) {
                 return trump;
             }
@@ -166,7 +180,10 @@ public class GameMemory {
      * Returns the highest unplayed card of a Fehlfarbe (Sau > 10 > König > 9 > 8 > 7).
      */
     public Card getHighestRemainingCardOfSuit(Suit suit) {
-        List<Rank> ranks = List.of(Rank.SAU, Rank.ZEHN, Rank.KOENIG, Rank.NEUN, Rank.ACHT, Rank.SIEBEN);
+        List<Rank> ranks = java.util.Arrays.stream(Rank.values())
+            .filter(rank -> !isTrump(new Card(suit, rank)))
+            .sorted(Comparator.comparingInt((Rank rank) -> suitStrength(new Card(suit, rank))).reversed())
+            .toList();
         for (Rank r : ranks) {
             Card c = new Card(suit, r);
             if (!playedCards.contains(c)) {
@@ -181,7 +198,7 @@ public class GameMemory {
      */
     public int remainingTrumpsCount() {
         int count = 0;
-        for (Card t : ALL_TRUMPS_ORDERED) {
+        for (Card t : trumpsOrdered) {
             if (!playedCards.contains(t)) {
                 count++;
             }
@@ -215,9 +232,9 @@ public class GameMemory {
      * Checks if any unplayed trump (still in any player's hand) is stronger than the given trump.
      */
     public boolean canBeBeatenByUnplayedTrump(Card trumpCard) {
-        int strength = rules.getTrumpStrength(trumpCard);
-        for (Card trump : ALL_TRUMPS_ORDERED) {
-            if (!playedCards.contains(trump) && rules.getTrumpStrength(trump) > strength) {
+        int strength = trumpStrength(trumpCard);
+        for (Card trump : trumpsOrdered) {
+            if (!playedCards.contains(trump) && trumpStrength(trump) > strength) {
                 return true; // A higher trump is still out!
             }
         }
@@ -228,14 +245,53 @@ public class GameMemory {
      * Checks if any unplayed non-trump card of the same suit is stronger than the given card.
      */
     public boolean canBeBeatenByUnplayedSuitCard(Card suitCard) {
-        int strength = rules.getSuitStrength(suitCard);
-        for (Rank r : List.of(Rank.SAU, Rank.ZEHN, Rank.KOENIG, Rank.NEUN, Rank.ACHT, Rank.SIEBEN)) {
+        int strength = suitStrength(suitCard);
+        for (Rank r : Rank.values()) {
             Card c = new Card(suitCard.suit(), r);
-            if (!playedCards.contains(c) && rules.getSuitStrength(c) > strength) {
+            if (!isTrump(c) && !playedCards.contains(c) && suitStrength(c) > strength) {
                 return true;
             }
         }
         return false;
+    }
+
+    private boolean isTrump(Card card) {
+        return activeContract == null ? rules.isTrump(card) : activeContract.isTrump(card, rules);
+    }
+
+    private int trumpStrength(Card card) {
+        return activeContract == null ? rules.getTrumpStrength(card) : activeContract.getTrumpStrength(card);
+    }
+
+    private int suitStrength(Card card) {
+        return activeContract == null ? rules.getSuitStrength(card) : activeContract.getSuitStrength(card);
+    }
+
+    public boolean isUnbeatableAgainst(Card card, Player observer, List<Player> opponents) {
+        if (opponents.isEmpty()) {
+            return true;
+        }
+        for (Suit suit : Suit.values()) {
+            for (Rank rank : Rank.values()) {
+                Card possible = new Card(suit, rank);
+                if (playedCards.contains(possible) || observer.hasCard(possible) || possible.equals(card)) {
+                    continue;
+                }
+                if (canBeatLead(possible, card)
+                    && getPossibleHolders(possible, observer).stream().anyMatch(opponents::contains)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private boolean canBeatLead(Card possible, Card card) {
+        if (isTrump(possible)) {
+            return !isTrump(card) || trumpStrength(possible) > trumpStrength(card);
+        }
+        return !isTrump(card) && possible.suit() == card.suit()
+                && suitStrength(possible) > suitStrength(card);
     }
 
     /**
@@ -249,6 +305,9 @@ public class GameMemory {
             RufspielContract contract,
             Player partner
     ) {
+        if (!trick.playedCards().contains(currentBest)) {
+            return false;
+        }
         // Filter out remaining players who are on the same team
         List<Player> remainingOpponents = remainingPlayers.stream()
                 .filter(p -> !isTeammate(p, currentBest.player(), contract, partner))
@@ -268,9 +327,8 @@ public class GameMemory {
                 return true;
             }
             // If all remaining opponents are definitely void in Trumpf -> they cannot trump!
-            boolean allOpponentsTrumpVoid = remainingOpponents.stream()
+                return remainingOpponents.stream()
                     .allMatch(opp -> isDefiniteVoid(opp, SuitCategory.TRUMP));
-            return allOpponentsTrumpVoid;
         } else {
             // Teammate holds a Fehlfarbe card
             SuitCategory suitCat = SuitCategory.fromCard(bestCard, rules);

@@ -25,6 +25,70 @@ class SimpleBotGenomePolicyTest {
     private final RuleEngine rules = new RuleEngine();
 
         @Test
+        void defenderOpeningUsesLongSuitAgainstNextCallerAndShortSuitAgainstLastCaller() {
+                Player defender = new Player("1", "A");
+                Player caller = new Player("2", "B");
+                Player third = new Player("3", "C");
+                Player fourth = new Player("4", "D");
+                Card longLead = new Card(Suit.EICHEL, Rank.SIEBEN);
+                Card shortLead = new Card(Suit.GRAS, Rank.SIEBEN);
+                defender.setHand(List.of(longLead, new Card(Suit.EICHEL, Rank.ACHT), shortLead));
+                WenzContract contract = new WenzContract(caller);
+                SimpleBot bot = new SimpleBot(rules, true, PolicyGenome.baseline());
+                var next = bot.chooseMove(defender, new Trick(1, defender), contract, List.of(defender, third, fourth),
+                                1, null, new GameMemory(List.of(defender, caller, third, fourth), rules, contract),
+                                List.of(caller, third, fourth));
+                var last = bot.chooseMove(defender, new Trick(1, defender), contract, List.of(defender, third, fourth),
+                                1, null, new GameMemory(List.of(defender, third, fourth, caller), rules, contract),
+                                List.of(third, fourth, caller));
+
+                assertEquals(longLead, next.card());
+                assertEquals(shortLead, last.card());
+        }
+
+        @Test
+        void soloistCanConcealOwnTopOberByLeadingTheSafeGrasOber() {
+                Player caller = new Player("1", "Sepp");
+                Player defender = new Player("2", "Hans");
+                Card grasOber = new Card(Suit.GRAS, Rank.OBER);
+                caller.setHand(List.of(new Card(Suit.EICHEL, Rank.OBER), grasOber,
+                                new Card(Suit.EICHEL, Rank.SIEBEN)));
+                SoloContract contract = new SoloContract(caller, Suit.HERZ);
+                GameMemory memory = new GameMemory(List.of(caller, defender), rules, contract);
+
+                MoveExplanation move = new SimpleBot(rules, true, PolicyGenome.baseline())
+                                .chooseMove(caller, new Trick(1, caller), contract, List.of(caller), 1,
+                                                null, memory, List.of(defender));
+
+                assertEquals(grasOber, move.card());
+                assertTrue(move.tacticalReasoning().contains("Untertreibt"));
+                assertTrue(move.tacticalReasoning().contains("unsicher"));
+        }
+
+        @Test
+        void wenzDefenderSmearsShortTenWhenPartnerTrickIsUnbeatable() {
+                Player caller = new Player("1", "Hans");
+                Player partner = new Player("2", "Franz");
+                Player defender = new Player("3", "Sepp");
+                Player last = new Player("4", "Du");
+                Card ten = new Card(Suit.EICHEL, Rank.ZEHN);
+                defender.setHand(List.of(ten, new Card(Suit.GRAS, Rank.SIEBEN)));
+                WenzContract contract = new WenzContract(caller);
+                Trick trick = new Trick(1, partner);
+                GameMemory memory = new GameMemory(List.of(caller, partner, defender, last), rules, contract);
+                Card topTrump = new Card(Suit.EICHEL, Rank.UNTER);
+                memory.recordCardPlayed(partner, topTrump, trick, contract);
+                trick.addCard(partner, topTrump);
+
+                MoveExplanation move = new SimpleBot(rules, true, PolicyGenome.baseline())
+                                .chooseMove(defender, trick, contract, List.of(partner, defender, last), 1,
+                                                null, memory, List.of(last, caller));
+
+                assertEquals(ten, move.card());
+                assertTrue(move.tacticalReasoning().contains("sicheren Partnerstich"));
+        }
+
+        @Test
         void activeGenomeDoesNotLeadLowestTrumpFromObservedWeakGrassSoloHand() {
                 Player caller = new Player("1", "Sepp");
                 Card highestTrump = new Card(Suit.SCHELLEN, Rank.UNTER);

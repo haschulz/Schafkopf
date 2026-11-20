@@ -292,7 +292,7 @@ public class InteractiveTrainingGame {
                 : suggestion.card();
         current.removeCard(chosenCard);
         if (memory != null) {
-            memory.recordCardPlayed(current, chosenCard, trick, game.contract());
+            memory.recordCardPlayed(current, chosenCard, trick, game.gameContract());
         }
         trick.addCard(current, chosenCard);
 

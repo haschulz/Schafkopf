@@ -166,7 +166,7 @@ class ContractRulesTest {
     }
 
     @Test
-    void toutRequiresAllEightTricksAndPaysExistingSchwarzBonus() {
+    void toutRequiresAllEightTricksAndDoublesPriceWithoutSchneiderOrSchwarz() {
         Player caller = new Player("1", "Sepp");
         assertToutResult(new SoloContract(caller, Suit.EICHEL, true), true);
         assertToutResult(new WenzContract(caller, true), false);
@@ -184,7 +184,7 @@ class ContractRulesTest {
                 ? new SoloContract(players.get(0), ((SoloContract) contract).trumpSuit(), true)
                 : new WenzContract(players.get(0), true));
         for (int trickNumber = 1; trickNumber <= 8; trickNumber++) {
-            Player winner = callerWins || trickNumber < 8 ? players.get(0) : players.get(1);
+            Player winner = players.get(callerWins || trickNumber < 8 ? 0 : 1);
             Trick trick = new Trick(trickNumber, players.get(0));
             trick.setWinningPlayedCard(new schafkopf.model.PlayedCard(
                     winner, new Card(Suit.EICHEL, Rank.OBER)));
@@ -198,8 +198,9 @@ class ContractRulesTest {
         assertEquals(callerWins, result.callerTeamWon());
         assertEquals(callerWins, result.isSchwarz());
         assertFalse(result.isSchneider());
-        assertEquals(callerWins ? 10 : 0, payment.schwarzCents());
-        assertEquals(50 + (callerWins ? 10 : 0), payment.totalCentsPerPlayer());
+        assertEquals(0, payment.schneiderCents());
+        assertEquals(0, payment.schwarzCents());
+        assertEquals(100, payment.totalCentsPerPlayer());
     }
 
     @Test

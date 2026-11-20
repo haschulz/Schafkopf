@@ -26,6 +26,12 @@ import java.util.Set;
 import java.util.function.Consumer;
 
 public final class GameBiddingAdvisor {
+    private static final String SIDE_SUIT_WINNERS = "sideSuitWinners";
+    private static final String VOID_SIDE_SUITS = "voidSideSuits";
+    private static final String SINGLETON_SIDE_SUITS = "singletonSideSuits";
+    private static final String LONG_SIDE_SUITS_WITHOUT_ACE = "longSideSuitsWithoutAce";
+    private static final String SIDE_TENS_WITH_ACE = "sideTensWithAce";
+
     public record ContractRecommendation(GameContract contract, double score) {
     }
 
@@ -33,6 +39,79 @@ public final class GameBiddingAdvisor {
     private final PolicyGenome genome;
     private final Consumer<DecisionTrace> traceSink;
     private final ContractValueModel valueModel;
+    private DecisionAnalysis.Report lastAnalysis;
+
+    public DecisionAnalysis.Report lastAnalysis() {
+        return lastAnalysis;
+    }
+
+    public ContractRecommendation recommendWithAnalysis(
+            Player player, Set<GameType> allowedGameTypes, DecisionInformation information,
+            GameContract standingBid, int samples
+    ) {
+        if (!player.hand().equals(information.hand()) || !information.publicPlays().isEmpty()) {
+            throw new IllegalArgumentException("Bidding information must describe the acting player's full hand");
+        }
+        List<GameContract> contracts = analyticalContracts(player, allowedGameTypes, standingBid);
+        if (contracts.isEmpty()) {
+            lastAnalysis = null;
+            return null;
+        }
+        List<schafkopf.analysis.GameRecord.ContractSpec> specs = contracts.stream()
+                .map(contract -> specFor(contract, information.observerSeat())).toList();
+        var current = standingBid == null ? null : specFor(standingBid,
+                Integer.parseInt(standingBid.caller().id()) - 1);
+        lastAnalysis = new DecisionAnalysis(DecisionAnalysis.opponentPool()).contracts(
+                information, specs, current, samples, information.seed());
+        Map<String, Double> scores = new LinkedHashMap<>();
+        Map<String, Map<String, Double>> features = new LinkedHashMap<>();
+        lastAnalysis.alternatives().forEach((action, estimate) -> {
+            scores.put(action, estimate.expectedReturnCents());
+            features.put(action, Map.of("winProbability", estimate.winProbability(),
+                    "probabilityLow", estimate.probabilityLow(), "probabilityHigh", estimate.probabilityHigh(),
+                    "opponentEyes", estimate.opponentEyes(), "opponentTricks", estimate.opponentTricks(),
+                    "samples", (double) estimate.worlds()));
+        });
+        String selection = lastAnalysis.selectedAction();
+        traceSink.accept(new DecisionTrace(genome.id(), DecisionTrace.Stage.BIDDING, "ANALYSIS",
+                player.id(), new ArrayList<>(scores.keySet()), selection, scores, features,
+                "Vergleich erlaubter Verträge mit PASS auf gleichen Verteilungen. " + lastAnalysis.uncertainty()));
+        for (int index = 0; index < contracts.size(); index++) {
+            if (DecisionAnalysis.contractKey(specs.get(index)).equals(selection)) {
+                return new ContractRecommendation(contracts.get(index), scores.get(selection));
+            }
+        }
+        return null;
+    }
+
+    private List<GameContract> analyticalContracts(Player player, Set<GameType> allowed, GameContract standingBid) {
+        List<GameContract> candidates = new ArrayList<>();
+        for (Suit suit : new BiddingAdvisor(rules, genome).getValidRufspielSuits(player)) {
+            candidates.add(new RufspielContract(player, suit));
+        }
+        for (Suit suit : Suit.values()) {
+            candidates.add(new SoloContract(player, suit));
+            candidates.add(new SoloContract(player, suit, true));
+            candidates.add(new WenzContract(player, suit));
+        }
+        candidates.add(new WenzContract(player));
+        candidates.add(new WenzContract(player, true));
+        var biddingRules = new schafkopf.rules.GameBiddingRules();
+        return candidates.stream().filter(contract -> allowed.contains(contract.gameType()))
+                .filter(contract -> biddingRules.canAnnounce(contract, standingBid)).toList();
+    }
+
+    private schafkopf.analysis.GameRecord.ContractSpec specFor(GameContract contract, int seat) {
+        Suit suit = null;
+        if (contract instanceof RufspielContract rufspiel) {
+            suit = rufspiel.calledSuit();
+        } else if (contract instanceof SoloContract solo) {
+            suit = solo.trumpSuit();
+        } else if (contract instanceof WenzContract wenz) {
+            suit = wenz.trumpSuit();
+        }
+        return new schafkopf.analysis.GameRecord.ContractSpec(contract.gameType(), seat, suit, contract.isTout());
+    }
 
     public GameBiddingAdvisor(RuleEngine rules, PolicyGenome genome) {
         this(rules, genome, ignored -> { }, ContractValueModel.loadConfigured());
@@ -148,6 +227,9 @@ public final class GameBiddingAdvisor {
         long unterCount = player.hand().stream()
             .filter(card -> contract.isTrump(card, rules) && card.rank() == Rank.UNTER)
             .count();
+        long oberCount = player.hand().stream()
+            .filter(card -> contract.isTrump(card, rules) && card.rank() == Rank.OBER)
+            .count();
         long nonTrumpOberCount = player.hand().stream()
             .filter(card -> !contract.isTrump(card, rules) && card.rank() == Rank.OBER)
             .count();
@@ -166,11 +248,7 @@ public final class GameBiddingAdvisor {
             .filter(card -> contract.isTrump(card, rules))
             .mapToInt(contract::getTrumpStrength)
             .sum() / 14.0;
-        int sideSuitWinners = 0;
-        int voidSideSuits = 0;
-        int singletonSideSuits = 0;
-        int longSideSuitsWithoutAce = 0;
-        int sideTensWithAce = 0;
+        Map<String, Double> sideSuits = sideSuitFeatures(player, contract);
         int bettelHighCards = 0;
         int bettelTopCards = 0;
         int bettelLowCards = 0;
@@ -189,29 +267,6 @@ public final class GameBiddingAdvisor {
                 .count();
             chosenSuitTrumpPoints = suitTrumps.stream().mapToInt(Card::points).sum();
         }
-        for (Suit suit : Suit.values()) {
-            List<Card> sideCards = player.hand().stream()
-                .filter(card -> !contract.isTrump(card, rules) && card.suit() == suit)
-                .toList();
-            if (sideCards.isEmpty()) {
-            voidSideSuits++;
-            } else {
-            int highestSuitStrength = sideCards.stream().mapToInt(contract::getSuitStrength).max().orElse(0);
-            if (highestSuitStrength >= 5) {
-                sideSuitWinners++;
-            }
-            if (sideCards.size() == 1) {
-                singletonSideSuits++;
-            }
-            boolean hasAce = sideCards.stream().anyMatch(card -> card.rank() == Rank.SAU);
-            if (sideCards.size() >= 3 && !hasAce) {
-                longSideSuitsWithoutAce++;
-            }
-            if (hasAce && sideCards.stream().anyMatch(card -> card.rank() == Rank.ZEHN)) {
-                sideTensWithAce++;
-            }
-            }
-        }
         if (contract.gameType() == GameType.BETTEL) {
             bettelHighCards = (int) player.hand().stream()
                 .filter(card -> contract.getSuitStrength(card) >= 5)
@@ -228,6 +283,7 @@ public final class GameBiddingAdvisor {
         return Map.ofEntries(
             Map.entry("trumpCount", (double) trumpCount),
             Map.entry("topTrumps", (double) topTrumps),
+                Map.entry("oberCount", (double) oberCount),
                 Map.entry("unterCount", (double) unterCount),
                 Map.entry("nonTrumpOberCount", (double) nonTrumpOberCount),
             Map.entry("trumpPoints", trumpPoints / 11.0),
@@ -235,11 +291,11 @@ public final class GameBiddingAdvisor {
             Map.entry("aces", (double) aces),
             Map.entry("highCards", (double) highCards),
             Map.entry("lowCards", (double) lowCards),
-            Map.entry("sideSuitWinners", (double) sideSuitWinners),
-            Map.entry("voidSideSuits", (double) voidSideSuits),
-            Map.entry("singletonSideSuits", (double) singletonSideSuits),
-            Map.entry("longSideSuitsWithoutAce", (double) longSideSuitsWithoutAce),
-            Map.entry("sideTensWithAce", (double) sideTensWithAce),
+            Map.entry(SIDE_SUIT_WINNERS, sideSuits.get(SIDE_SUIT_WINNERS)),
+            Map.entry(VOID_SIDE_SUITS, sideSuits.get(VOID_SIDE_SUITS)),
+            Map.entry(SINGLETON_SIDE_SUITS, sideSuits.get(SINGLETON_SIDE_SUITS)),
+            Map.entry(LONG_SIDE_SUITS_WITHOUT_ACE, sideSuits.get(LONG_SIDE_SUITS_WITHOUT_ACE)),
+            Map.entry(SIDE_TENS_WITH_ACE, sideSuits.get(SIDE_TENS_WITH_ACE)),
             Map.entry("bettelHighCards", (double) bettelHighCards),
             Map.entry("bettelTopCards", (double) bettelTopCards),
                 Map.entry("bettelLowCards", (double) bettelLowCards),
@@ -248,7 +304,27 @@ public final class GameBiddingAdvisor {
                 Map.entry("chosenSuitTrumpPoints", chosenSuitTrumpPoints / 11.0));
     }
 
-    private Map<String, Double> decisionFeatures(Player player, GameContract contract) {
+        private Map<String, Double> sideSuitFeatures(Player player, GameContract contract) {
+        List<List<Card>> suits = java.util.Arrays.stream(Suit.values())
+            .filter(suit -> java.util.Arrays.stream(Rank.values())
+                .anyMatch(rank -> !contract.isTrump(new Card(suit, rank), rules)))
+            .map(suit -> player.hand().stream()
+                .filter(card -> card.suit() == suit && !contract.isTrump(card, rules)).toList())
+            .toList();
+        return Map.of(
+                SIDE_SUIT_WINNERS, (double) suits.stream().filter(cards -> cards.stream()
+                .anyMatch(card -> contract.getSuitStrength(card) >= 5)).count(),
+                VOID_SIDE_SUITS, (double) suits.stream().filter(List::isEmpty).count(),
+                SINGLETON_SIDE_SUITS, (double) suits.stream().filter(cards -> cards.size() == 1).count(),
+                LONG_SIDE_SUITS_WITHOUT_ACE, (double) suits.stream()
+                .filter(cards -> cards.size() >= 3 && cards.stream()
+                    .noneMatch(card -> card.rank() == Rank.SAU)).count(),
+                SIDE_TENS_WITH_ACE, (double) suits.stream().filter(cards ->
+                cards.stream().anyMatch(card -> card.rank() == Rank.SAU)
+                && cards.stream().anyMatch(card -> card.rank() == Rank.ZEHN)).count());
+        }
+
+        private Map<String, Double> decisionFeatures(Player player, GameContract contract) {
         Map<String, Double> features = new LinkedHashMap<>(featuresFor(player, contract));
         features.put("expectedValueCents", valueModel.estimate(contract.gameType(), features));
         return features;

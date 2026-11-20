@@ -19,6 +19,22 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 class GameBiddingAdvisorTest {
+        @Test
+        void soloFeaturesSeparateObersFromUntersAndExcludeTrumpSuitFromVoids() {
+                Player caller = new Player("1", "Sepp");
+                caller.setHand(List.of(new Card(Suit.EICHEL, Rank.OBER),
+                                new Card(Suit.GRAS, Rank.UNTER), new Card(Suit.HERZ, Rank.SAU),
+                                new Card(Suit.EICHEL, Rank.SAU), new Card(Suit.SCHELLEN, Rank.SAU)));
+                GameBiddingAdvisor advisor = new GameBiddingAdvisor(new RuleEngine(), PolicyGenome.baseline(),
+                                ignored -> { }, ContractValueModel.empty());
+
+                var features = advisor.featuresFor(caller, new SoloContract(caller, Suit.HERZ));
+
+                assertEquals(1.0, features.get("oberCount"));
+                assertEquals(1.0, features.get("unterCount"));
+                assertEquals(1.0, features.get("voidSideSuits"));
+        }
+
     @Test
     void genomeWeightsSelectWenzWhenRufspielIsUnavailable() {
         Player player = new Player("1", "Sepp");

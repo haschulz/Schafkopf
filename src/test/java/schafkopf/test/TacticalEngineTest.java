@@ -18,6 +18,49 @@ import java.util.List;
 
 public class TacticalEngineTest {
 
+    @Test
+    void memoryUsesActiveContractForTrumpCountsAndVoidInformation() {
+        RuleEngine rules = new RuleEngine();
+        Player caller = new Player("1", "Sepp");
+        Player defender = new Player("2", "Hans");
+        List<Player> players = List.of(caller, defender);
+        var wenz = new schafkopf.model.WenzContract(caller);
+        GameMemory memory = new GameMemory(players, rules, wenz);
+        org.junit.jupiter.api.Assertions.assertEquals(4, memory.remainingTrumpsCount());
+        Trick trick = new Trick(1, caller);
+        Card lead = new Card(Suit.HERZ, Rank.SAU);
+        memory.recordCardPlayed(caller, lead, trick, wenz);
+        trick.addCard(caller, lead);
+        memory.recordCardPlayed(defender, new Card(Suit.EICHEL, Rank.OBER), trick, wenz);
+        org.junit.jupiter.api.Assertions.assertTrue(memory.isDefiniteVoid(defender, SuitCategory.HERZ));
+        org.junit.jupiter.api.Assertions.assertFalse(memory.isDefiniteVoid(defender, SuitCategory.TRUMP));
+        org.junit.jupiter.api.Assertions.assertEquals(11, new GameMemory(players, rules,
+                new schafkopf.model.WenzContract(caller, Suit.EICHEL)).remainingTrumpsCount());
+        org.junit.jupiter.api.Assertions.assertEquals(14, new GameMemory(players, rules,
+                new schafkopf.model.SoloContract(caller, Suit.GRAS)).remainingTrumpsCount());
+    }
+
+            @Test
+            void ownHigherTrumpMakesLowerTrumpSafeButUnknownTrumpsPreventSafeAceClaim() {
+            RuleEngine rules = new RuleEngine();
+            Player caller = new Player("1", "Sepp");
+            Player defender = new Player("2", "Hans");
+            Card eichelOber = new Card(Suit.EICHEL, Rank.OBER);
+            Card grasOber = new Card(Suit.GRAS, Rank.OBER);
+            caller.setHand(List.of(eichelOber, grasOber));
+            var contract = new schafkopf.model.SoloContract(caller, Suit.HERZ);
+            GameMemory memory = new GameMemory(List.of(caller, defender), rules, contract);
+
+            org.junit.jupiter.api.Assertions.assertTrue(
+                memory.isUnbeatableAgainst(grasOber, caller, List.of(defender)));
+            org.junit.jupiter.api.Assertions.assertEquals(List.of(caller), memory.getPossibleHolders(eichelOber, caller));
+            org.junit.jupiter.api.Assertions.assertFalse(memory.isUnbeatableAgainst(
+                new Card(Suit.EICHEL, Rank.SAU), caller, List.of(defender)));
+            caller.setHand(List.of(grasOber));
+            org.junit.jupiter.api.Assertions.assertFalse(
+                memory.isUnbeatableAgainst(grasOber, caller, List.of(defender)));
+            }
+
     public static void main(String[] args) {
         System.out.println("==========================================================================");
         System.out.println("               UNIT TESTS FÜR TAKTIK- UND GEDÄCHTNIS-ENGINE               ");

@@ -1,6 +1,9 @@
 package schafkopf.state;
 
 import schafkopf.ai.GameMemory;
+import schafkopf.ai.DecisionAnalysis;
+import schafkopf.ai.DecisionInformation;
+import schafkopf.analysis.GameRecord;
 import schafkopf.ai.SimpleBot;
 import schafkopf.config.SchafkopfConfig;
 import schafkopf.model.Card;
@@ -49,8 +52,13 @@ public class SchafkopfGame {
     private boolean schneiderPaid = true;
     private boolean schwarzClaimed = true;
     private GameResult result;
+    private DecisionAnalysis decisionAnalysis;
+    private DecisionAnalysis.Report lastDecisionAnalysis;
+    private int analysisSamples;
+    private int openingLeaderSeat;
 
-    private Consumer<String> logger = System.out::println;
+            private Consumer<String> logger = java.util.logging.Logger
+                .getLogger(SchafkopfGame.class.getName())::info;
 
     public SchafkopfGame(List<Player> players, RuleEngine rules) {
         this(players, rules, new SimpleBot(rules), SchafkopfConfig.load());
@@ -168,6 +176,33 @@ public class SchafkopfGame {
         return memory;
     }
 
+    public void enableDecisionAnalysis(int samples) {
+        if (samples < 2 || samples > 10000) {
+            throw new IllegalArgumentException("Decision analysis needs 2 to 10000 worlds");
+        }
+        decisionAnalysis = new DecisionAnalysis(DecisionAnalysis.opponentPool());
+        analysisSamples = samples;
+    }
+
+    public DecisionAnalysis.Report lastDecisionAnalysis() {
+        return lastDecisionAnalysis;
+    }
+
+    public DecisionInformation decisionInformation() {
+        Player observer = currentPlayer();
+        if (observer == null) {
+            throw new IllegalStateException("No pending decision");
+        }
+        List<GameRecord.Play> plays = new ArrayList<>();
+        completedTricks.forEach(trick -> trick.playedCards().forEach(play ->
+                plays.add(new GameRecord.Play(players.indexOf(play.player()), play.card()))));
+        currentTrick.playedCards().forEach(play ->
+                plays.add(new GameRecord.Play(players.indexOf(play.player()), play.card())));
+        return new DecisionInformation(players.stream().map(Player::name).toList(), players.indexOf(observer),
+                observer.hand(), plays, GameRecord.ContractSpec.of(contract, players), openingLeaderSeat,
+                config, bettingState.multiplier());
+    }
+
     /**
      * Deals cards randomly to all 4 players.
      */
@@ -227,6 +262,7 @@ public class SchafkopfGame {
             }
         this.contract = contract;
         this.partner = null;
+        this.memory = new GameMemory(players, rules, contract);
 
         if (contract instanceof RufspielContract rufspielContract) {
             Card calledSau = rufspielContract.calledSau();
@@ -235,14 +271,12 @@ public class SchafkopfGame {
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException(
                     "Called Sau " + calledSau + " not found in any player hand!"));
-            this.memory = new GameMemory(players, rules);
             log(String.format("Ansage: %s ruft auf die %s-Sau!", contract.caller().name(),
                 rufspielContract.calledSuit().displayName()));
             log(String.format("-> Geheimer Mitspieler: %s (besitzt %s)", partner.name(), calledSau.shortName()));
             return;
         }
 
-        this.memory = null;
         log("Ansage: " + contract.displayName());
     }
 
@@ -287,12 +321,13 @@ public class SchafkopfGame {
             throw new IllegalArgumentException("Starting leader must be seated at this table");
         }
         transitionTo(Phase.TRICK_PLAY);
-        if (contract instanceof RufspielContract && memory == null) {
-            memory = new GameMemory(players, rules);
+        if (memory == null) {
+            memory = new GameMemory(players, rules, contract);
         }
         currentTrickNumber = 1;
         turnIndex = 0;
         trickLeader = startingLeader;
+        openingLeaderSeat = players.indexOf(startingLeader);
         currentTrick = new Trick(currentTrickNumber, trickLeader);
     }
 
@@ -303,11 +338,47 @@ public class SchafkopfGame {
         }
         List<Player> remainingPlayers = remainingPlayers();
         MoveExplanation explanation = chooseBotMove(player, remainingPlayers);
+        explanation = analyseBotMove(explanation);
         int trickNumber = currentTrickNumber;
         int turnNumber = turnIndex + 1;
         playCard(explanation.card());
         log(explanation.toLogLine(trickNumber, turnNumber));
         return explanation;
+    }
+
+    private MoveExplanation analyseBotMove(MoveExplanation heuristic) {
+        if (decisionAnalysis == null || legalMovesForCurrentPlayer().size() == 1
+                || !List.of(GameType.RUFSPIEL, GameType.FARBSOLO, GameType.WENZ, GameType.FARBWENZ)
+                        .contains(contract.gameType())) {
+            return heuristic;
+        }
+        DecisionInformation information = decisionInformation();
+        try {
+            lastDecisionAnalysis = decisionAnalysis.cards(information, analysisSamples, information.seed());
+        } catch (IllegalStateException unavailable) {
+            return new MoveExplanation(currentPlayer(), heuristic.card(), heuristic.ruleRequirement(),
+                    heuristic.tacticalReasoning() + " | Keine konsistente Stichprobe: Heuristik, keine Gewinnschätzung", true);
+        }
+        String selection = lastDecisionAnalysis.selectedAction();
+        Card selected = legalMovesForCurrentPlayer().stream()
+                .filter(card -> card.shortName().equals(selection)).findFirst().orElseThrow();
+        var estimate = lastDecisionAnalysis.alternatives().get(selection);
+        String reasoning = String.format(java.util.Locale.ROOT,
+                "Informationsgerechte Analyse: %s, Gewinn %.1f%% [%.1f; %.1f], Erwartung %.2f ct +/- %.2f; "
+                        + "Gegner %.1f Augen / %.1f Stiche, %d Welten, %d Policies. %s",
+                selection, 100 * estimate.winProbability(), 100 * estimate.probabilityLow(),
+                100 * estimate.probabilityHigh(), estimate.expectedReturnCents(),
+                estimate.returnStandardErrorCents(), estimate.opponentEyes(), estimate.opponentTricks(),
+                estimate.worlds(), lastDecisionAnalysis.opponentPolicies().size(), lastDecisionAnalysis.uncertainty());
+        return new MoveExplanation(currentPlayer(), selected, heuristic.ruleRequirement(), reasoning, true);
+    }
+
+    public MoveExplanation previewBotTurn() {
+        Player player = currentPlayer();
+        if (player == null) {
+            throw new IllegalStateException("No pending card decision");
+        }
+        return chooseBotMove(player, remainingPlayers());
     }
 
     public void playCard(Card card) {
@@ -322,7 +393,7 @@ public class SchafkopfGame {
         player.removeCard(card);
         int previousObservations = memory == null ? 0 : memory.observationLogs().size();
         if (memory != null) {
-            memory.recordCardPlayed(player, card, currentTrick, (RufspielContract) contract);
+            memory.recordCardPlayed(player, card, currentTrick, contract);
         }
         currentTrick.addCard(player, card);
 
@@ -345,15 +416,17 @@ public class SchafkopfGame {
 
     private MoveExplanation chooseBotMove(Player player, List<Player> remainingPlayers) {
         if (contract instanceof RufspielContract rufspielContract) {
-            return botProvider.apply(player).chooseMove(
-                    player, currentTrick, rufspielContract, partner, calledSauPlayed,
+            return botProvider.apply(player).chooseFromPublicInformation(
+                player, currentTrick, rufspielContract, calledSauPlayed,
                     currentTrickNumber, memory, remainingPlayers);
         }
-        String roleOverride = contract instanceof KreuzbockContract
-                ? (players.indexOf(player) % 2 == 0 ? "KREUZBOCK_TEAM_A" : "KREUZBOCK_TEAM_B")
-                : null;
+        String roleOverride = null;
+        if (contract instanceof KreuzbockContract) {
+            roleOverride = players.indexOf(player) % 2 == 0 ? "KREUZBOCK_TEAM_A" : "KREUZBOCK_TEAM_B";
+        }
         return botProvider.apply(player).chooseMove(
-                player, currentTrick, contract, teamFor(player), currentTrickNumber, roleOverride);
+            player, currentTrick, contract, teamFor(player), currentTrickNumber, roleOverride,
+            memory, remainingPlayers);
     }
 
     private List<Player> remainingPlayers() {
@@ -424,37 +497,18 @@ public class SchafkopfGame {
             || contract.gameType() == GameType.RAMSCH;
         boolean isSchneider = !specialScoring && !contract.isTout()
                 && ((callerWon && defenderPoints <= 30) || (!callerWon && callerPoints <= 30));
-        boolean isSchwarz = !specialScoring
-            && (contract.isTout()
-            ? callerWon && defenderTricks == 0
-            : (callerWon && defenderTricks == 0) || (!callerWon && callerTricks == 0));
+        boolean isSchwarz = !specialScoring && schwarzResult(callerWon, callerTricks, defenderTricks);
 
         StringBuilder sb = new StringBuilder();
         sb.append("\n=========================================\n");
         sb.append("           SPIELABRECHNUNG               \n");
         sb.append("=========================================\n");
-        sb.append(String.format("Partei 1 (%s): %d Augen\n",
+        sb.append(String.format("Partei 1 (%s): %d Augen%n",
             callerTeam.stream().map(Player::name).toList(), callerPoints));
-        sb.append(String.format("Partei 2 (%s): %d Augen\n",
+        sb.append(String.format("Partei 2 (%s): %d Augen%n",
             defenderTeam.stream().map(Player::name).toList(), defenderPoints));
 
-        if (ramschOutcome != null) {
-            if (ramschOutcome.durchmarsch()) {
-                sb.append("ERGEBNIS: ").append(ramschOutcome.winners().get(0).name())
-                    .append(" GEWINNT DEN DURCHMARSCH (> 90 AUGEN)!");
-            } else {
-                sb.append("ERGEBNIS: Ramsch-Verlierer: ")
-                    .append(ramschOutcome.losers().stream().map(Player::name).toList());
-            }
-        } else if (callerWon) {
-            sb.append("ERGEBNIS: Partei 1 GEWINNT!");
-            if (isSchwarz) sb.append(" (SCHWARZ - Partei 2 ohne Stich!)");
-            else if (isSchneider) sb.append(" (SCHNEIDER - Partei 2 <= 30 Augen!)");
-        } else {
-            sb.append("ERGEBNIS: Partei 2 GEWINNT!");
-            if (isSchwarz) sb.append(" (SCHWARZ - Partei 1 ohne Stich!)");
-            else if (isSchneider) sb.append(" (SCHNEIDER - Partei 1 <= 30 Augen!)");
-        }
+        appendOutcome(sb, ramschOutcome, callerWon, isSchwarz, isSchneider);
         sb.append("\n=========================================");
 
         log(sb.toString());
@@ -473,6 +527,34 @@ public class SchafkopfGame {
                 sb.toString()
         );
         return result;
+    }
+
+    private boolean schwarzResult(boolean callerWon, long callerTricks, long defenderTricks) {
+        if (contract.isTout()) {
+            return callerWon && defenderTricks == 0;
+        }
+        return callerWon ? defenderTricks == 0 : callerTricks == 0;
+    }
+
+    private void appendOutcome(StringBuilder sb, RamschOutcome ramschOutcome,
+                               boolean callerWon, boolean isSchwarz, boolean isSchneider) {
+        if (ramschOutcome != null) {
+            if (ramschOutcome.durchmarsch()) {
+                sb.append("ERGEBNIS: ").append(ramschOutcome.winners().get(0).name())
+                    .append(" GEWINNT DEN DURCHMARSCH (> 90 AUGEN)!");
+            } else {
+                sb.append("ERGEBNIS: Ramsch-Verlierer: ")
+                    .append(ramschOutcome.losers().stream().map(Player::name).toList());
+            }
+        } else if (callerWon) {
+            sb.append("ERGEBNIS: Partei 1 GEWINNT!");
+            if (isSchwarz) sb.append(" (SCHWARZ - Partei 2 ohne Stich!)");
+            else if (isSchneider) sb.append(" (SCHNEIDER - Partei 2 <= 30 Augen!)");
+        } else {
+            sb.append("ERGEBNIS: Partei 2 GEWINNT!");
+            if (isSchwarz) sb.append(" (SCHWARZ - Partei 1 ohne Stich!)");
+            else if (isSchneider) sb.append(" (SCHNEIDER - Partei 1 <= 30 Augen!)");
+        }
     }
 
         private RamschOutcome determineRamschOutcome() {

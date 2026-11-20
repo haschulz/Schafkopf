@@ -138,11 +138,16 @@ public record GameRecord(
      * @throws IllegalArgumentException if a recorded play is illegal with these hands
      */
     public SchafkopfGame replay(List<List<Card>> hands, int playCount, RuleEngine rules, SimpleBot bot) {
+        return replay(hands, playCount, rules, bot, SchafkopfConfig.defaults());
+    }
+
+    public SchafkopfGame replay(List<List<Card>> hands, int playCount, RuleEngine rules,
+                               SimpleBot bot, SchafkopfConfig config) {
         List<Player> players = new ArrayList<>();
         for (int seat = 0; seat < 4; seat++) {
             players.add(new Player(String.valueOf(seat + 1), playerNames.get(seat)));
         }
-        SchafkopfGame game = new SchafkopfGame(players, rules, player -> bot, SchafkopfConfig.defaults());
+        SchafkopfGame game = new SchafkopfGame(players, rules, player -> bot, config);
         game.setLogger(null);
         game.setCustomHands(hands);
         game.setupContract(contract.bind(players));
